@@ -174,12 +174,19 @@ class ProbingDataset:
         # Save HF dataset
         self.dataset.save_to_disk(f"{path}/hf_dataset")
 
+        # Get position types from the examples
+        position_types = set()
+        for example in self.examples:
+            if example.character_positions:
+                position_types.update(example.character_positions.keys())
+
         # Save metadata
         metadata = {
             "task_type": self.task_type,
             "valid_layers": self.valid_layers,
             "label_mapping": self.label_mapping,
-            "metadata": self.metadata,  # Remove position_types from metadata
+            "metadata": self.metadata,
+            "position_types": list(position_types)  # Add position_types to metadata
         }
 
         with open(f"{path}/metadata.json", "w") as f:
