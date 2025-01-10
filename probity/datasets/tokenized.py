@@ -149,6 +149,7 @@ class TokenizedProbingDataset(ProbingDataset):
             task_type=dataset.task_type,
             valid_layers=dataset.valid_layers,
             label_mapping=dataset.label_mapping,
+            position_types=dataset.position_types,
             metadata=dataset.metadata,
         )
 

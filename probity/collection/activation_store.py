@@ -41,6 +41,7 @@ class ActivationStore:
             If multiple positions: (total_positions, hidden_size)
         """
         positions = []
+        print(f"Examining position key: {position_key}")
         for idx in self.example_indices:
             example = self.dataset.examples[idx]
             if example.token_positions:

@@ -2,6 +2,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
 import torch
+import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset
 from torch import optim
 from typing import Optional, Dict, Any, List, Tuple, Type, Literal
@@ -9,7 +10,7 @@ from tqdm.auto import tqdm
 import math
 
 from probity.collection.activation_store import ActivationStore
-from probity.probes.linear_probe import LinearProbe, LinearProbeConfig
+from probity.probes.linear_probe import BaseProbe, LinearProbeConfig
 
 @dataclass
 class BaseTrainerConfig:
@@ -293,3 +294,94 @@ class SupervisedProbeTrainer(BaseProbeTrainer):
                 total_loss += loss.item()
         
         return total_loss / len(val_loader)
+    
+
+@dataclass
+class DirectionalTrainerConfig(BaseTrainerConfig):
+    """Configuration for training direction-finding probes."""
+    pass  # Uses base config settings
+
+
+class DirectionalProbeTrainer(BaseProbeTrainer):
+    """Trainer for probes that find directions through direct computation rather than gradient descent."""
+    
+    def __init__(self, config: DirectionalTrainerConfig):
+        super().__init__(config)
+    
+    def prepare_supervised_data(
+        self,
+        activation_store: ActivationStore,
+        position_key: str,
+    ) -> Tuple[DataLoader, DataLoader]:
+        """Prepare train/val splits with DataLoader creation."""
+        X = self.prepare_data(activation_store, position_key)
+        _, y = activation_store.get_probe_data(position_key)
+        
+        # Convert labels to float
+        y = y.float()
+        
+        # For directional probes, we don't need to split the data
+        # but we'll maintain the same interface for consistency
+        dataset = TensorDataset(X, y)
+        
+        # Create single loader for all data
+        loader = DataLoader(
+            dataset, 
+            batch_size=self.config.batch_size,
+            shuffle=True
+        )
+        
+        # Return the same loader twice since we don't need validation
+        return loader, loader
+    
+    def train(
+        self,
+        model: BaseProbe,
+        train_loader: DataLoader,
+        val_loader: Optional[DataLoader] = None,
+    ) -> Dict[str, List[float]]:
+        """Train method for directional probes.
+        
+        For K-means, PCA, and Mean Difference probes, this involves:
+        1. Accumulating all data from the DataLoader
+        2. Calling the probe's fit method once
+        3. Computing training and validation metrics
+        """
+        # Accumulate all training data
+        x_train, y_train = [], []
+        for batch_x, batch_y in train_loader:
+            x_train.append(batch_x)
+            y_train.append(batch_y)
+            
+        x_train_tensor = torch.cat(x_train, dim=0).to(self.config.device)
+        y_train_tensor = torch.cat(y_train, dim=0).to(self.config.device)
+        
+        # Fit the probe
+        model.fit(x_train_tensor, y_train_tensor)
+        
+        # Compute metrics
+        history = {
+            "train_loss": [],
+            "val_loss": [] if val_loader else [],
+        }
+        
+        # Calculate training loss
+        train_preds = model(x_train_tensor)
+        train_loss = nn.BCEWithLogitsLoss()(train_preds, y_train_tensor.float())
+        history["train_loss"].append(train_loss.item())
+        
+        # Calculate validation loss if applicable
+        if val_loader is not None:
+            x_val, y_val = [], []
+            for batch_x, batch_y in val_loader:
+                x_val.append(batch_x)
+                y_val.append(batch_y)
+                
+            x_val_tensor = torch.cat(x_val, dim=0).to(self.config.device)
+            y_val_tensor = torch.cat(y_val, dim=0).to(self.config.device)
+            
+            val_preds = model(x_val_tensor)
+            val_loss = nn.BCEWithLogitsLoss()(val_preds, y_val_tensor.float())
+            history["val_loss"].append(val_loss.item())
+            
+        return history

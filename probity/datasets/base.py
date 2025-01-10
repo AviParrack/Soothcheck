@@ -46,6 +46,13 @@ class ProbingDataset:
         self.valid_layers = valid_layers or []
         self.label_mapping = label_mapping or {}
         self.metadata = metadata or {}
+
+        # Add position_types attribute - derived from examples
+        self.position_types = set()
+        for example in examples:
+            if example.character_positions:
+                self.position_types.update(example.character_positions.keys())
+                
         self.dataset = self._to_hf_dataset()
 
     def add_target_positions(

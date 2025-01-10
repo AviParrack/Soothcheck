@@ -46,20 +46,41 @@ class ProbePipeline(Generic[C, P]):
                 batch_size=self.config.activation_batch_size
             )
         )
+
         return self.collector.collect(self.config.dataset)
     
     def _load_or_collect_activations(self) -> Dict[str, ActivationStore]:
-        """Load activations from cache if available, otherwise collect them."""
+        """Load activations from cache if available and valid, otherwise collect them."""
         if self.config.cache_dir:
             cache_path = Path(self.config.cache_dir)
             if cache_path.exists():
                 stores = {}
+                cache_valid = True
+                
+                # Try to load and validate each hook point
                 for hook_point in self.config.hook_points or []:
                     store_path = cache_path / hook_point.replace(".", "_")
                     if store_path.exists():
-                        stores[hook_point] = ActivationStore.load(str(store_path))
-                if stores:
+                        try:
+                            store = ActivationStore.load(str(store_path))
+                            if self._validate_cache_compatibility(store, hook_point):
+                                stores[hook_point] = store
+                            else:
+                                print(f"Cache for {hook_point} is incompatible with current configuration")
+                                cache_valid = False
+                                break
+                        except Exception as e:
+                            print(f"Error loading cache for {hook_point}: {e}")
+                            cache_valid = False
+                            break
+                            
+                if cache_valid and stores:
                     return stores
+                else:
+                    # If cache is invalid, clear it
+                    import shutil
+                    shutil.rmtree(cache_path)
+                    print("Cleared invalid cache directory")
                     
         # If we get here, need to collect activations
         stores = self._collect_activations()
@@ -68,11 +89,44 @@ class ProbePipeline(Generic[C, P]):
         if self.config.cache_dir:
             cache_path = Path(self.config.cache_dir)
             cache_path.mkdir(parents=True, exist_ok=True)
+            
+            # Save configuration hash with the cache
             for hook_point, store in stores.items():
                 store_path = cache_path / hook_point.replace(".", "_")
                 store.save(str(store_path))
                 
         return stores
+    
+    def _validate_cache_compatibility(self, store: ActivationStore, hook_point: str) -> bool:
+        """Validate if cached activation store matches current configuration.
+        
+        Args:
+            store: Loaded activation store
+            hook_point: Hook point being validated
+            
+        Returns:
+            bool: Whether cache is compatible
+        """
+        # Check dataset compatibility
+        if len(store.dataset.examples) != len(self.config.dataset.examples):
+            return False
+        
+        # Check if tokenization configs match
+        if not hasattr(store.dataset, 'tokenization_config') or \
+           not hasattr(self.config.dataset, 'tokenization_config'):
+            return False
+        
+        store_config = store.dataset.tokenization_config
+        current_config = self.config.dataset.tokenization_config
+        
+        if store_config.tokenizer_name != current_config.tokenizer_name:
+            return False
+        
+        # Check if position types match
+        if store.dataset.position_types != self.config.dataset.position_types:
+            return False
+        
+        return True
     
     def run(self, hook_point: Optional[str] = None) -> BaseProbe:
         """Run the full pipeline.
@@ -136,3 +190,33 @@ class ProbePipeline(Generic[C, P]):
             pipeline.probe = BaseProbe.load(str(probe_path))
             
         return pipeline
+    
+    def _get_cache_key(self) -> str:
+        """Generate a unique key for the current configuration."""
+        import hashlib
+        import json
+        
+        # Collect relevant configuration details
+        config_dict = {
+            "model_name": self.config.model_name,
+            "hook_points": self.config.hook_points,
+            "position_key": self.config.position_key,
+            "tokenizer_name": self.config.dataset.tokenization_config.tokenizer_name,
+            "dataset_size": len(self.config.dataset.examples),
+            "position_types": list(self.config.dataset.position_types)
+        }
+        
+        # Create deterministic string representation
+        config_str = json.dumps(config_dict, sort_keys=True)
+        
+        # Generate hash
+        return hashlib.md5(config_str.encode()).hexdigest()
+    
+    def _get_cache_path(self) -> Path:
+        """Get cache path including configuration hash."""
+        if not self.config.cache_dir:
+            raise ValueError("Cache directory not specified")
+        
+        base_path = Path(self.config.cache_dir)
+        config_hash = self._get_cache_key()
+        return base_path / config_hash
