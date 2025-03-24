@@ -313,26 +313,39 @@ class DirectionalProbeTrainer(BaseProbeTrainer):
         activation_store: ActivationStore,
         position_key: str,
     ) -> Tuple[DataLoader, DataLoader]:
-        """Prepare train/val splits with DataLoader creation."""
+        """Prepare data for directional probe computation.
+        
+        For directional probes, we don't need separate train/val splits since training
+        is done in one shot through direct computation (not gradient descent).
+        This method maintains the same interface as other trainers for consistency,
+        but returns the same DataLoader twice.
+        
+        Args:
+            activation_store: Store containing the activations
+            position_key: Key to access the relevant positions
+            
+        Returns:
+            Tuple of (data_loader, data_loader) - the same loader is returned twice
+            to maintain API compatibility with other trainers.
+        """
         X = self.prepare_data(activation_store, position_key)
         _, y = activation_store.get_probe_data(position_key)
         
         # Convert labels to float
         y = y.float()
         
-        # For directional probes, we don't need to split the data
-        # but we'll maintain the same interface for consistency
+        # Create a dataset with all data
         dataset = TensorDataset(X, y)
         
-        # Create single loader for all data
-        loader = DataLoader(
+        # Create loader for all data
+        all_data_loader = DataLoader(
             dataset, 
             batch_size=self.config.batch_size,
             shuffle=True
         )
         
-        # Return the same loader twice since we don't need validation
-        return loader, loader
+        # Return the same loader twice to maintain the trainer interface
+        return all_data_loader, all_data_loader
     
     def train(
         self,

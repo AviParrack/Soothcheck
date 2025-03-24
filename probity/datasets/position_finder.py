@@ -12,6 +12,8 @@ class Position:
     end: Optional[int] = None  # Character end position (exclusive)
 
     def __post_init__(self):
+        if self.start < 0:
+            raise ValueError("Start position must be non-negative")
         if self.end is not None and self.end < self.start:
             raise ValueError("End position must be greater than start position")
 
@@ -104,46 +106,32 @@ class PositionFinder:
         text: str,
         tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast],
         space_precedes_token: bool = True,
+        add_special_tokens: bool = True,
     ) -> int:
-        """Convert a character position to a token position.
-
+        """
+        Convert character position to token position, handling special tokens properly.
+        
         Args:
             position: Character position to convert
-            text: The full text string
-            tokenizer: Tokenizer to use for conversion
-            space_precedes_token: Whether spaces are included with the following token (True)
-                                or the preceding token (False). Most tokenizers use True.
-
-        Returns:
-            Token position corresponding to the character position
-        """
-        # If position is at start, no need for space adjustment
-        if position.start == 0:
-            prefix = ""
-        else:
-            # Find the last space before the position
-            prefix_end = position.start
-            if space_precedes_token:
-                # Include the previous space if it exists
-                space_pos = text.rfind(" ", 0, position.start)
-                if space_pos != -1:
-                    prefix_end = space_pos
+            text: Input text
+            tokenizer: Tokenizer to use
+            space_precedes_token: Whether space precedes token (default: True)
+            add_special_tokens: Whether to add special tokens (default: True)
             
-            prefix = text[:prefix_end]
-            #print(f"Extracted prefix: '{prefix}'")
-
-        # Check if tokenizer adds special tokens at start
-        special_tokens_count = len(tokenizer("", add_special_tokens=True).input_ids) - len(tokenizer("", add_special_tokens=False).input_ids)
-        #print(f"Number of special tokens added by tokenizer: {special_tokens_count}")
-
-        # Access input_ids directly as a list
-        prefix_tokens = tokenizer(prefix, add_special_tokens=False).input_ids
-        #print(f"Prefix tokens: {prefix_tokens}")
-        #print(f"Number of prefix tokens: {len(prefix_tokens)}")
-
-        final_position = len(prefix_tokens) + special_tokens_count
-        #print(f"Final token position: {final_position}")
-        return final_position
+        Returns:
+            Token index corresponding to the character position
+        """
+        # 1) Tokenize with offset mapping
+        encoding = tokenizer(text, return_offsets_mapping=True, add_special_tokens=add_special_tokens)
+        offsets = encoding.offset_mapping  # List of (start_char, end_char) pairs
+        
+        # 2) Find the token whose span covers position.start
+        for token_idx, (start_char, end_char) in enumerate(offsets):
+            if start_char <= position.start < end_char:
+                return token_idx
+        
+        # If not found, either raise an error or return -1 to indicate position not found:
+        raise ValueError(f"Character position {position.start} not aligned with any token offset.")
 
     @staticmethod
     def validate_token_position(token_position: int, tokens: List[int]) -> bool:

@@ -19,6 +19,7 @@ class TokenizationConfig:
     vocab_size: int
     pad_token_id: Optional[int]
     eos_token_id: Optional[int]
+    bos_token_id: Optional[int] = None  # Add BOS token ID
 
 
 @dataclass
@@ -105,12 +106,12 @@ class TokenizedProbingDataset(ProbingDataset):
                 for key, pos in example.character_positions.positions.items():
                     if isinstance(pos, Position):
                         positions[key] = PositionFinder.convert_to_token_position(
-                            pos, example.text, tokenizer
+                            pos, example.text, tokenizer, add_special_tokens=True
                         )
                     else:  # List[Position]
                         positions[key] = [
                             PositionFinder.convert_to_token_position(
-                                p, example.text, tokenizer
+                                p, example.text, tokenizer, add_special_tokens=True
                             )
                             for p in pos
                         ]
@@ -141,6 +142,7 @@ class TokenizedProbingDataset(ProbingDataset):
             vocab_size=tokenizer.vocab_size,
             pad_token_id=tokenizer.pad_token_id,
             eos_token_id=tokenizer.eos_token_id,
+            bos_token_id=tokenizer.bos_token_id,  # Add BOS token ID
         )
 
         return cls(
@@ -168,11 +170,19 @@ class TokenizedProbingDataset(ProbingDataset):
             if tokenized_ex.token_positions is None:
                 continue
             seq_len = len(tokenized_ex.tokens)
+            
+            # Skip validation for BOS token if it exists
+            bos_token_id = self.tokenization_config.bos_token_id
+            if bos_token_id is not None and tokenized_ex.tokens and tokenized_ex.tokens[0] == bos_token_id:
+                seq_len -= 1  # Adjust sequence length to exclude BOS token
+            
             for pos in tokenized_ex.token_positions.positions.values():
-                if isinstance(pos, int) and pos >= seq_len:
-                    return False
-                elif isinstance(pos, list) and any(p >= seq_len for p in pos):
-                    return False
+                if isinstance(pos, int):
+                    if pos >= seq_len:
+                        return False
+                elif isinstance(pos, list):
+                    if any(p >= seq_len for p in pos):
+                        return False
         return True
 
     def get_batch_tensors(

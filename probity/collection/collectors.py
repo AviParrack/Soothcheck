@@ -35,26 +35,30 @@ class TransformerLensCollector:
         """
         all_activations = {}
 
+        # Set model to evaluation mode
+        self.model.eval()
+
         # Process in batches
-        for batch_start in range(0, len(dataset.examples), self.config.batch_size):
-            batch_end = min(batch_start + self.config.batch_size, len(dataset.examples))
-            batch_indices = list(range(batch_start, batch_end))
+        with torch.no_grad():  # Disable gradient computation for determinism
+            for batch_start in range(0, len(dataset.examples), self.config.batch_size):
+                batch_end = min(batch_start + self.config.batch_size, len(dataset.examples))
+                batch_indices = list(range(batch_start, batch_end))
 
-            # Get batch tensors
-            batch = dataset.get_batch_tensors(batch_indices)
+                # Get batch tensors
+                batch = dataset.get_batch_tensors(batch_indices)
 
-            # Run model with caching
-            _, cache = self.model.run_with_cache(
-                batch["input_ids"].to(self.config.device),
-                names_filter=self.config.hook_points,
-                return_cache_object=True,
-            )
+                # Run model with caching
+                _, cache = self.model.run_with_cache(
+                    batch["input_ids"].to(self.config.device),
+                    names_filter=self.config.hook_points,
+                    return_cache_object=True,
+                )
 
-            # Store activations for each hook point
-            for hook in self.config.hook_points:
-                if hook not in all_activations:
-                    all_activations[hook] = []
-                all_activations[hook].append(cache[hook].cpu())
+                # Store activations for each hook point
+                for hook in self.config.hook_points:
+                    if hook not in all_activations:
+                        all_activations[hook] = []
+                    all_activations[hook].append(cache[hook].cpu())
 
         # Create ActivationCache objects
         return {

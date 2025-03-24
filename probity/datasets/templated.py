@@ -127,13 +127,37 @@ class TemplatedDataset:
                         for name, value in zip(bound_vars, bound_combo):
                             marker = template.get_marker(name)
                             text = text.replace(marker, value)
-                            var_metadata[name] = template.variables[name].metadata
+
+                            # UPDATED: Slice out the relevant metadata
+                            var = template.variables[name]
+                            sliced_md = {}
+                            if var.metadata:
+                                # For each key in var.metadata, pick the sub-value that matches this 'value'
+                                # based on its position in var.values
+                                value_index = var.values.index(value)
+                                sliced_md = {
+                                    k: var.metadata[k][value_index]
+                                    for k in var.metadata
+                                    if isinstance(var.metadata[k], list) and len(var.metadata[k]) > value_index
+                                }
+                            var_metadata[name] = sliced_md if sliced_md else var.metadata
                         
                         # Insert neutral variables
                         for name, value in zip(neutral_vars, neutral_combo):
                             marker = template.get_marker(name)
                             text = text.replace(marker, value)
-                            var_metadata[name] = template.variables[name].metadata
+
+                            # UPDATED: Only store relevant slice for neutral variables as well
+                            var = template.variables[name]
+                            sliced_md = {}
+                            if var.metadata:
+                                value_index = var.values.index(value)
+                                sliced_md = {
+                                    k: var.metadata[k][value_index]
+                                    for k in var.metadata
+                                    if isinstance(var.metadata[k], list) and len(var.metadata[k]) > value_index
+                                }
+                            var_metadata[name] = sliced_md if sliced_md else var.metadata
                         
                         # Determine label if specified
                         label = 0

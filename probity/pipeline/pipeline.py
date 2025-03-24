@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import List, Optional, Dict, Type, Generic, TypeVar
+from typing import List, Optional, Dict, Type, Generic, TypeVar, Any
 import torch
 from pathlib import Path
 
@@ -25,6 +25,7 @@ class ProbePipelineConfig:
     model_name: Optional[str] = None
     hook_points: Optional[List[str]] = None
     activation_batch_size: int = 32
+
 
 class ProbePipeline(Generic[C, P]):
     """Pipeline for end-to-end probe training including activation collection."""
@@ -126,9 +127,13 @@ class ProbePipeline(Generic[C, P]):
         if store.dataset.position_types != self.config.dataset.position_types:
             return False
         
+        # Check if model name matches
+        if hasattr(store, 'model_name') and self.config.model_name and store.model_name != self.config.model_name:
+            return False
+        
         return True
     
-    def run(self, hook_point: Optional[str] = None) -> BaseProbe:
+    def run(self, hook_point: Optional[str] = None) -> tuple[BaseProbe, Any]:
         """Run the full pipeline.
         
         Args:
@@ -168,7 +173,42 @@ class ProbePipeline(Generic[C, P]):
         
         # Save probe if exists
         if self.probe:
+            # Save in regular format for backward compatibility
             self.probe.save(str(save_path / "probe.pt"))
+            
+            # Also save as ProbeVector if the hook_point is known
+            if self.config.model_name and self.config.hook_points:
+                try:
+                    from probity.probes.probe_vector import ProbeVector
+                    hook_point = self.config.hook_points[0]  # Use first hook point
+                    
+                    # Extract layer number correctly
+                    if "blocks." in hook_point and "." in hook_point:
+                        # Format like "blocks.7.hook_resid_pre"
+                        parts = hook_point.split(".")
+                        try:
+                            # Try to extract the number after "blocks."
+                            hook_layer = int(parts[1])
+                        except (IndexError, ValueError):
+                            # Default to 0 if parsing fails
+                            hook_layer = 0
+                    else:
+                        # Default for non-standard hook points
+                        hook_layer = 0
+                    
+                    # Convert to ProbeVector
+                    probe_vector = self.probe.to_probe_vector(
+                        model_name=self.config.model_name,
+                        hook_point=hook_point,
+                        hook_layer=hook_layer,
+                        dataset_path=getattr(self.config.dataset, "dataset_path", ""),
+                        prepend_bos=getattr(self.config.dataset, "prepend_bos", True)
+                    )
+                    
+                    # Save ProbeVector
+                    probe_vector.save(str(save_path / "probe_vector.json"))
+                except Exception as e:
+                    print(f"Could not save as ProbeVector: {e}")
             
         # Save config
         torch.save(self.config, str(save_path / "config.pt"))
@@ -184,10 +224,38 @@ class ProbePipeline(Generic[C, P]):
         # Create pipeline
         pipeline = cls(config)
         
-        # Load probe if exists
+        # Try loading vector format first, then fall back to regular probe
+        probe_vector_path = load_path / "probe_vector.json"
         probe_path = load_path / "probe.pt"
-        if probe_path.exists():
-            pipeline.probe = BaseProbe.load(str(probe_path))
+        
+        # Determine device
+        device = config.trainer_config.device if hasattr(config, 'trainer_config') else "cpu"
+        
+        if probe_vector_path.exists():
+            try:
+                from probity.probes.probe_vector import ProbeVector
+                
+                # Convert to BaseProbe - this will now handle standardization buffers
+                probe_cls = config.probe_cls
+                pipeline.probe = probe_cls.load_json(str(probe_vector_path))
+                
+                # Move to correct device
+                pipeline.probe.to(device)
+            except Exception as e:
+                print(f"Error loading from ProbeVector format: {e}")
+                # Fall back to regular probe if vector loading fails
+                if probe_path.exists():
+                    try:
+                        pipeline.probe = config.probe_cls.load(str(probe_path))
+                        pipeline.probe.to(device)
+                    except Exception as e2:
+                        print(f"Error loading probe from pt format: {e2}")
+        elif probe_path.exists():
+            try:
+                pipeline.probe = config.probe_cls.load(str(probe_path))
+                pipeline.probe.to(device)
+            except Exception as e:
+                print(f"Error loading probe: {e}")
             
         return pipeline
     
