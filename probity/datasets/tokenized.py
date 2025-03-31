@@ -20,6 +20,7 @@ class TokenizationConfig:
     pad_token_id: Optional[int]
     eos_token_id: Optional[int]
     bos_token_id: Optional[int] = None  # Add BOS token ID
+    padding_side: str = "right"  # "right" or "left" padding
 
 
 @dataclass
@@ -82,6 +83,25 @@ class TokenizedProbingDataset(ProbingDataset):
         data_dict["tokens"] = [ex.tokens for ex in examples]
         if all(ex.attention_mask is not None for ex in examples):
             data_dict["attention_mask"] = [ex.attention_mask for ex in examples]
+            
+        # Save token positions if they exist
+        position_keys = set()
+        for ex in examples:
+            if ex.token_positions:
+                position_keys.update(ex.token_positions.keys())
+        
+        # Add token position data columns
+        for key in position_keys:
+            data_dict[f"token_pos_{key}"] = []
+            
+        # Fill in token position data
+        for ex in examples:
+            for key in position_keys:
+                if ex.token_positions and key in ex.token_positions.keys():
+                    data_dict[f"token_pos_{key}"].append(ex.token_positions[key])
+                else:
+                    # Add a placeholder for missing positions
+                    data_dict[f"token_pos_{key}"].append(None)
 
         return Dataset.from_dict(data_dict)
 
@@ -90,34 +110,86 @@ class TokenizedProbingDataset(ProbingDataset):
         cls,
         dataset: ProbingDataset,
         tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast],
+        add_special_tokens: bool = True,  # Explicitly control special tokens
         **tokenizer_kwargs,
     ) -> "TokenizedProbingDataset":
         """Create TokenizedProbingDataset from ProbingDataset."""
         tokenized_examples = []
+        
+        # Get the tokenizer's padding side
+        padding_side = getattr(tokenizer, "padding_side", "right")
+        is_left_padding = padding_side == "left"
+        
+        # Ensure add_special_tokens is in tokenizer_kwargs for consistency
+        tokenizer_kwargs['add_special_tokens'] = add_special_tokens
 
         for example in dataset.examples:
-            # Tokenize the text
-            tokens = tokenizer(example.text, return_tensors="pt", **tokenizer_kwargs)
-
+            # First, tokenize without padding to get accurate token positions
+            no_padding_kwargs = {k: v for k, v in tokenizer_kwargs.items() if k != 'padding'}
+            no_padding_kwargs['padding'] = False  # Explicitly set padding to False
+            
+            # Tokenize the text without padding but with special tokens if requested
+            no_pad_tokens_info = tokenizer(example.text, return_tensors="pt", **no_padding_kwargs)
+            no_pad_tokens = no_pad_tokens_info["input_ids"][0].tolist()
+            
+            # Now tokenize with all requested kwargs (may include padding)
+            tokens_info = tokenizer(example.text, return_tensors="pt", **tokenizer_kwargs)
+            padded_tokens = tokens_info["input_ids"][0].tolist()
+            attention_mask = (
+                tokens_info["attention_mask"][0].tolist()
+                if "attention_mask" in tokens_info
+                else None
+            )
+            
+            # Find padding length if left padding is used
+            pad_length = 0
+            if is_left_padding and attention_mask:
+                # Find where the content starts (first 1 in attention mask)
+                for i, mask in enumerate(attention_mask):
+                    if mask == 1:
+                        pad_length = i
+                        break
+            
             # Convert character positions to token positions if they exist
             token_positions = None
             if example.character_positions:
                 positions = {}
                 for key, pos in example.character_positions.positions.items():
+                    # Use the no-padding tokens for position conversion to get accurate positions
                     if isinstance(pos, Position):
-                        positions[key] = PositionFinder.convert_to_token_position(
-                            pos, example.text, tokenizer, add_special_tokens=True
+                        # Convert single position relative to unpadded tokens
+                        token_pos = PositionFinder.convert_to_token_position(
+                            pos, example.text, tokenizer, 
+                            add_special_tokens=add_special_tokens,
+                            padding_side=padding_side
                         )
+                        
+                        # If using left padding, the positions in padded tokens will be offset
+                        if is_left_padding and pad_length > 0:
+                            positions[key] = token_pos + pad_length
+                        else:
+                            positions[key] = token_pos
+                            
                     else:  # List[Position]
-                        positions[key] = [
+                        # Convert list of positions
+                        token_positions = [
                             PositionFinder.convert_to_token_position(
-                                p, example.text, tokenizer, add_special_tokens=True
+                                p, example.text, tokenizer, 
+                                add_special_tokens=add_special_tokens,
+                                padding_side=padding_side
                             )
                             for p in pos
                         ]
+                        
+                        # Adjust for left padding if needed
+                        if is_left_padding and pad_length > 0:
+                            positions[key] = [tp + pad_length for tp in token_positions]
+                        else:
+                            positions[key] = token_positions
+                
                 token_positions = TokenPositions(positions)
 
-            # Create tokenized example
+            # Create tokenized example with accurate token positions
             tokenized_example = TokenizedProbingExample(
                 text=example.text,
                 label=example.label,
@@ -126,23 +198,20 @@ class TokenizedProbingDataset(ProbingDataset):
                 token_positions=token_positions,
                 group_id=example.group_id,
                 metadata=example.metadata,
-                tokens=tokens["input_ids"][0].tolist(),
-                attention_mask=(
-                    tokens["attention_mask"][0].tolist()
-                    if "attention_mask" in tokens
-                    else None
-                ),
+                tokens=padded_tokens,  # Use the full tokens with padding
+                attention_mask=attention_mask,
             )
             tokenized_examples.append(tokenized_example)
 
-        # Create tokenization config
+        # Create tokenization config with explicit record of special token handling
         tokenization_config = TokenizationConfig(
             tokenizer_name=tokenizer.name_or_path,
             tokenizer_kwargs=tokenizer_kwargs,
             vocab_size=tokenizer.vocab_size,
             pad_token_id=tokenizer.pad_token_id,
             eos_token_id=tokenizer.eos_token_id,
-            bos_token_id=tokenizer.bos_token_id,  # Add BOS token ID
+            bos_token_id=tokenizer.bos_token_id,
+            padding_side=padding_side,
         )
 
         return cls(
@@ -173,15 +242,18 @@ class TokenizedProbingDataset(ProbingDataset):
             
             # Skip validation for BOS token if it exists
             bos_token_id = self.tokenization_config.bos_token_id
+            bos_offset = 0
             if bos_token_id is not None and tokenized_ex.tokens and tokenized_ex.tokens[0] == bos_token_id:
-                seq_len -= 1  # Adjust sequence length to exclude BOS token
+                bos_offset = 1  # Adjust sequence length to exclude BOS token
             
-            for pos in tokenized_ex.token_positions.positions.values():
+            # Note: For un-padded sequences, we don't need to adjust for padding side
+            # since positions are stored relative to the unpadded sequence
+            for key, pos in tokenized_ex.token_positions.positions.items():
                 if isinstance(pos, int):
-                    if pos >= seq_len:
+                    if pos < 0 or pos >= (seq_len - bos_offset):
                         return False
                 elif isinstance(pos, list):
-                    if any(p >= seq_len for p in pos):
+                    if any(p < 0 or p >= (seq_len - bos_offset) for p in pos):
                         return False
         return True
 
@@ -208,31 +280,71 @@ class TokenizedProbingDataset(ProbingDataset):
         attention_mask: List[List[int]] = []
         positions: Dict[str, List[Union[int, List[int]]]] = {pt: [] for pt in self.position_types}
 
-        for ex in examples:
-            if pad:
-                # Pad tokens
-                padded_tokens = ex.tokens + [self.tokenization_config.pad_token_id] * (
-                    max_len - len(ex.tokens)
-                )
-                input_ids.append(padded_tokens)
+        # Check padding direction
+        is_left_padding = self.tokenization_config.padding_side == "left"
 
-                # Pad attention mask
-                if ex.attention_mask is not None:
-                    padded_mask = ex.attention_mask + [0] * (
-                        max_len - len(ex.attention_mask)
-                    )
-                    attention_mask.append(padded_mask)
+        for ex in examples:
+            seq_len = len(ex.tokens)
+            padding_length = max_len - seq_len
+            
+            if pad:
+                if is_left_padding:
+                    # Left padding (add pad tokens at the beginning)
+                    pad_token = self.tokenization_config.pad_token_id or 0
+                    padded_tokens = [pad_token] * padding_length + ex.tokens
+                    input_ids.append(padded_tokens)
+                    
+                    # Left pad the attention mask
+                    if ex.attention_mask is not None:
+                        padded_mask = [0] * padding_length + ex.attention_mask
+                        attention_mask.append(padded_mask)
+                else:
+                    # Right padding (add pad tokens at the end)
+                    pad_token = self.tokenization_config.pad_token_id or 0
+                    padded_tokens = ex.tokens + [pad_token] * padding_length
+                    input_ids.append(padded_tokens)
+                    
+                    # Right pad the attention mask
+                    if ex.attention_mask is not None:
+                        padded_mask = ex.attention_mask + [0] * padding_length
+                        attention_mask.append(padded_mask)
             else:
                 input_ids.append(ex.tokens)
                 if ex.attention_mask is not None:
                     attention_mask.append(ex.attention_mask)
 
-            # Add positions
+            # Add positions for each position type
             for pt in self.position_types:
-                if ex.token_positions is not None:
-                    positions[pt].append(ex.token_positions[pt])
+                if ex.token_positions is not None and pt in ex.token_positions.keys():
+                    token_pos = ex.token_positions[pt]
+                    
+                    # For left padding, we need to adjust positions when padding
+                    # This is critical because the token positions from PositionFinder.convert_to_token_position
+                    # are based on unpadded tokens. When using left padding, all token indices need to be
+                    # shifted by the padding length to account for pad tokens inserted at the beginning.
+                    #
+                    # Example:
+                    # Original tokens: [BOS, token1, token2, token3]
+                    # Original position: 1 (points to token1)
+                    # After left padding with 2 tokens: [PAD, PAD, BOS, token1, token2, token3]
+                    # Adjusted position: 3 (1 + padding_length of 2)
+                    if pad and is_left_padding:
+                        if isinstance(token_pos, int):
+                            # Shift position by padding length
+                            adjusted_pos = token_pos + padding_length
+                            positions[pt].append(adjusted_pos)
+                        else:  # List of positions
+                            # Shift all positions by padding length
+                            adjusted_pos = [pos + padding_length for pos in token_pos]
+                            positions[pt].append(adjusted_pos)
+                    else:
+                        # For right padding or no padding, positions stay the same
+                        # since right padding adds tokens at the end, which doesn't affect
+                        # the indices of the existing tokens
+                        positions[pt].append(token_pos)
                 else:
-                    positions[pt].append(0)  # or whatever default value makes sense
+                    # Use a default position when position type doesn't exist for this example
+                    positions[pt].append(0)
 
         # Convert to tensors
         batch: Dict[str, Union[torch.Tensor, Dict[str, torch.Tensor]]] = {
@@ -266,14 +378,51 @@ class TokenizedProbingDataset(ProbingDataset):
         # Convert examples to TokenizedProbingExamples
         tokenized_examples = []
         hf_dataset = Dataset.load_from_disk(f"{path}/hf_dataset")
+        
+        # Extract position information from the dataset
+        position_types = base_dataset.position_types
+        position_data = {}
+        
+        # Find token position columns if they exist
+        token_position_columns = [col for col in hf_dataset.column_names 
+                                 if col.startswith("token_pos_")]
+        
+        if token_position_columns:
+            for col in token_position_columns:
+                # Extract the position key from the column name
+                key = col.replace("token_pos_", "")
+                position_data[key] = hf_dataset[col]
 
-        for base_ex, hf_item in zip(base_dataset.examples, hf_dataset):
+        for i, (base_ex, hf_item) in enumerate(zip(base_dataset.examples, hf_dataset)):
+            # Reconstruct token positions
+            token_positions = None
+            if position_types:
+                positions = {}
+                
+                # First try to get from token_position columns if they exist
+                if position_data:
+                    for key in position_types:
+                        if key in position_data:
+                            positions[key] = position_data[key][i]
+                
+                # If we don't have token positions but have character positions,
+                # we may need to reconstruct them
+                elif base_ex.character_positions:
+                    # This would ideally use a tokenizer to convert, but we don't have one here
+                    # We'll mark token positions as requiring verification
+                    # Users should call verify_position_tokens after loading
+                    pass
+                    
+                if positions:
+                    token_positions = TokenPositions(positions)
+            
             tokenized_examples.append(
                 TokenizedProbingExample(
                     text=base_ex.text,
                     label=base_ex.label,
                     label_text=base_ex.label_text,
                     character_positions=base_ex.character_positions,
+                    token_positions=token_positions,
                     group_id=base_ex.group_id,
                     metadata=base_ex.metadata,
                     tokens=cast(Dict[str, Any], hf_item)["tokens"],
@@ -281,7 +430,7 @@ class TokenizedProbingDataset(ProbingDataset):
                 )
             )
 
-        return cls(
+        dataset = cls(
             examples=tokenized_examples,
             tokenization_config=tokenization_config,
             task_type=base_dataset.task_type,
@@ -290,3 +439,330 @@ class TokenizedProbingDataset(ProbingDataset):
             position_types=base_dataset.position_types,
             metadata=base_dataset.metadata,
         )
+        
+        # Validate that positions are still valid
+        if not dataset.validate_positions():
+            print("Warning: Some token positions appear to be invalid. " +
+                  "Call verify_position_tokens to diagnose issues.")
+            
+        return dataset
+
+    def verify_position_tokens(
+        self, 
+        tokenizer: Optional[Union[PreTrainedTokenizer, PreTrainedTokenizerFast]] = None,
+        position_key: Optional[str] = None
+    ) -> Dict[str, Dict[str, Any]]:
+        """Verify that positions point to the expected tokens.
+        
+        Args:
+            tokenizer: Optional tokenizer to decode tokens. If None, uses token IDs.
+            position_key: Optional specific position key to verify. If None, verifies all.
+            
+        Returns:
+            Dictionary mapping example indices to position verification results
+        """
+        results = {}
+        
+        for i, example in enumerate(self.examples):
+            tokenized_ex = cast(TokenizedProbingExample, example)
+            if tokenized_ex.token_positions is None:
+                continue
+                
+            # Determine which position keys to check
+            keys_to_check = [position_key] if position_key else tokenized_ex.token_positions.keys()
+            example_results = {}
+            
+            # Get sequence length for validation
+            seq_len = len(tokenized_ex.tokens)
+            
+            for key in keys_to_check:
+                if key not in tokenized_ex.token_positions.keys():
+                    continue
+                    
+                # Get the position for this key
+                pos = tokenized_ex.token_positions[key]
+                
+                # Handle both single positions and lists of positions
+                positions = [pos] if isinstance(pos, int) else pos
+                
+                # Check all positions
+                for j, position in enumerate(positions):
+                    position_key = f"{key}_{j}" if isinstance(pos, list) else key
+                    
+                    if 0 <= position < seq_len:
+                        token_id = tokenized_ex.tokens[position]
+                        token_text = (
+                            tokenizer.decode([token_id]) if tokenizer else f"ID:{token_id}"
+                        )
+                        example_results[position_key] = {
+                            "position": position,
+                            "token_id": token_id,
+                            "token_text": token_text
+                        }
+                    else:
+                        example_results[position_key] = {
+                            "position": position,
+                            "error": f"Position out of bounds (0-{seq_len-1})"
+                        }
+            
+            if example_results:
+                results[i] = example_results
+                
+        return results
+
+    def show_token_context(
+        self,
+        example_idx: int,
+        position_key: str,
+        tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast],
+        context_size: int = 5
+    ) -> Dict[str, Any]:
+        """Show the token context around the position of interest for debugging.
+        
+        Args:
+            example_idx: Index of the example to examine
+            position_key: Position key to check
+            tokenizer: Tokenizer to decode tokens
+            context_size: Number of tokens to show before and after the position
+            
+        Returns:
+            Dictionary with context information
+        """
+        if example_idx >= len(self.examples):
+            raise ValueError(f"Example index {example_idx} out of range")
+            
+        example = cast(TokenizedProbingExample, self.examples[example_idx])
+        if example.token_positions is None or position_key not in example.token_positions.keys():
+            raise ValueError(f"Position key {position_key} not found in example {example_idx}")
+        
+        # Get the tokenizer padding side    
+        padding_side = self.tokenization_config.padding_side
+        is_left_padding = padding_side == "left"
+        
+        # Find the actual tokens (non-padding)
+        pad_token_id = self.tokenization_config.pad_token_id or 0
+        # For left-padding, find where the real tokens start
+        if is_left_padding:
+            # Find the first non-padding token
+            real_tokens_start = 0
+            for i, token_id in enumerate(example.tokens):
+                if token_id != pad_token_id:
+                    real_tokens_start = i
+                    break
+            real_tokens = example.tokens[real_tokens_start:]
+        else:
+            # For right padding, just strip padding tokens from the end
+            real_tokens_end = len(example.tokens)
+            for i in range(len(example.tokens) - 1, -1, -1):
+                if example.tokens[i] != pad_token_id:
+                    real_tokens_end = i + 1
+                    break
+            real_tokens = example.tokens[:real_tokens_end]
+        
+        # Get the position, adjusting for padding
+        pos = example.token_positions[position_key]
+        if is_left_padding:
+            # Calculate the actual padding length
+            padding_length = len(example.tokens) - len(real_tokens)
+            # Adjust positions to account for padding
+            if isinstance(pos, int):
+                # Convert from padded position to real position
+                adjusted_pos = pos - padding_length if pos >= padding_length else pos
+                positions = [adjusted_pos]
+            else:  # List of positions
+                positions = [p - padding_length if p >= padding_length else p for p in pos]
+        else:
+            # For right padding, positions are already correct
+            positions = [pos] if isinstance(pos, int) else pos
+        
+        # Get the full token list with indices for debugging
+        # Show the full tokens including padding for context
+        full_token_mapping = [
+            (i, token_id, tokenizer.decode([token_id])) 
+            for i, token_id in enumerate(example.tokens)
+        ]
+        
+        results = []
+        for i, position in enumerate(positions):
+            # For padded context, use the original position
+            orig_position = position
+            if is_left_padding:
+                # Add padding back to get the actual index in the padded sequence
+                position = position + padding_length if hasattr(locals(), 'padding_length') else position
+            
+            # Get context tokens (working with the full padded sequence)
+            start = max(0, position - context_size)
+            end = min(len(example.tokens), position + context_size + 1)
+            
+            context_tokens = example.tokens[start:end]
+            context_texts = [tokenizer.decode([t]) for t in context_tokens]
+            
+            # Mark the target position
+            rel_position = position - start  # Position within the context window
+            marked_context = context_texts.copy()
+            if 0 <= rel_position < len(marked_context):
+                marked_context[rel_position] = f"[[ {marked_context[rel_position]} ]]"
+            
+            # Get the token at the specified position
+            token_info = None
+            if 0 <= position < len(example.tokens):
+                token_id = example.tokens[position]
+                token_text = tokenizer.decode([token_id])
+                token_info = {"id": token_id, "text": token_text}
+            
+            results.append({
+                "position": position,
+                "original_position": orig_position,
+                "token_info": token_info,
+                "context_window": {
+                    "start": start,
+                    "end": end,
+                    "tokens": context_tokens,
+                    "texts": context_texts,
+                    "marked_context": " ".join(marked_context),
+                },
+                "padding_side": padding_side,
+                "real_tokens_length": len(real_tokens),
+                "padding_length": len(example.tokens) - len(real_tokens)
+            })
+        
+        return {
+            "example_idx": example_idx,
+            "position_key": position_key,
+            "example_text": example.text,
+            "token_count": len(example.tokens),
+            "first_few_tokens": full_token_mapping[:5],
+            "last_few_tokens": full_token_mapping[-5:] if len(full_token_mapping) > 5 else [],
+            "target_positions": positions,
+            "padding_side": padding_side,
+            "results": results[0] if len(results) == 1 else results
+        }
+
+    def verify_padding(
+        self, 
+        tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast],
+        max_length: Optional[int] = None,
+        examples_to_check: int = 3
+    ) -> Dict[str, Any]:
+        """Verify token positions with explicit padding applied.
+        
+        This helper method applies padding explicitly and verifies that token positions
+        are correctly aligned after padding, which is especially important for 
+        left-padding tokenizers.
+        
+        Args:
+            tokenizer: Tokenizer to use for padding and decoding
+            max_length: Maximum length for padding (if None, uses max sequence length)
+            examples_to_check: Number of examples to check
+            
+        Returns:
+            Dictionary with verification results
+        """
+        # Find the max length if not provided
+        if max_length is None:
+            max_length = self.get_max_sequence_length()
+            
+        # Get padding side
+        padding_side = self.tokenization_config.padding_side
+        is_left_padding = padding_side == "left"
+        
+        # Select a sample of examples to check
+        indices = list(range(min(examples_to_check, len(self.examples))))
+        
+        # Get batch tensors with padding applied
+        batch = self.get_batch_tensors(indices, pad=True)
+        
+        results = {}
+        for i, idx in enumerate(indices):
+            example = cast(TokenizedProbingExample, self.examples[idx])
+            if example.token_positions is None:
+                continue
+                
+            example_results = {}
+            padded_tokens = batch["input_ids"][i].tolist()
+            
+            # Check each position type
+            for key in self.position_types:
+                if key not in example.token_positions.keys():
+                    continue
+                    
+                # Get original position from the example
+                orig_pos = example.token_positions[key]
+                
+                # Get position from the batch (already adjusted for padding)
+                try:
+                    # Handle different possible formats of batch["positions"]
+                    if isinstance(batch["positions"], dict) and key in batch["positions"]:
+                        # If positions is a dict with position_type keys
+                        batch_pos_tensor = batch["positions"][key][i]
+                    elif isinstance(batch["positions"], torch.Tensor):
+                        # If positions is directly a tensor
+                        batch_pos_tensor = batch["positions"][i]
+                    else:
+                        # Fallback
+                        raise ValueError(f"Unsupported format for batch positions: {type(batch['positions'])}")
+                    
+                    # Convert tensor to list if needed
+                    if isinstance(batch_pos_tensor, torch.Tensor):
+                        batch_pos = batch_pos_tensor.tolist()
+                        # Handle scalar tensor
+                        if not isinstance(batch_pos, list):
+                            batch_pos = [batch_pos]
+                    else:
+                        # Handle raw value
+                        batch_pos = batch_pos_tensor
+                        if not isinstance(batch_pos, list):
+                            batch_pos = [batch_pos]
+                except Exception as e:
+                    # If we can't get batch_pos properly, use default position handling
+                    padding_length = max_length - len(example.tokens)
+                    if isinstance(orig_pos, int):
+                        batch_pos = [orig_pos + padding_length] if is_left_padding else [orig_pos]
+                    else:
+                        batch_pos = [p + padding_length for p in orig_pos] if is_left_padding else orig_pos
+                
+                # Handle both single and list positions
+                orig_positions = [orig_pos] if isinstance(orig_pos, int) else orig_pos
+                
+                position_results = []
+                for j, orig in enumerate(orig_positions):
+                    if j < len(batch_pos):
+                        batch = batch_pos[j]
+                        # Calculate expected position with padding
+                        padding_length = max_length - len(example.tokens)
+                        expected_pos = orig + padding_length if is_left_padding else orig
+                        
+                        # Check if position matches expectation
+                        position_match = expected_pos == batch
+                        
+                        # Get token at the position in padded sequence
+                        try:
+                            token_id = padded_tokens[batch] if 0 <= batch < len(padded_tokens) else None
+                            token_text = tokenizer.decode([token_id]) if token_id is not None else "OUT_OF_RANGE"
+                        except Exception as e:
+                            token_text = f"ERROR: {str(e)}"
+                        
+                        position_results.append({
+                            "original_position": orig,
+                            "padded_position": batch,
+                            "expected_position": expected_pos,
+                            "position_matches": position_match,
+                            "token_text": token_text,
+                            "padding_length": padding_length
+                        })
+                
+                example_results[key] = position_results[0] if len(position_results) == 1 else position_results
+            
+            results[idx] = {
+                "text": example.text,
+                "token_length": len(example.tokens),
+                "padded_length": max_length,
+                "padding_side": padding_side,
+                "positions": example_results
+            }
+            
+        return {
+            "padding_side": padding_side,
+            "max_length": max_length,
+            "examples": results
+        }

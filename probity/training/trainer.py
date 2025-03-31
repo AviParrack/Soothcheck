@@ -126,7 +126,7 @@ class SupervisedProbeTrainer(BaseProbeTrainer):
         _, y = activation_store.get_probe_data(position_key)
         
         # Convert labels to float
-        y = y.float()  # Add this line
+        y = y.float()
         
         # Split data
         n_train = int(len(X) * self.config.train_ratio)
@@ -141,9 +141,13 @@ class SupervisedProbeTrainer(BaseProbeTrainer):
         # Handle both single and multi-dimensional labels
         y_train = y_train if y_train.dim() > 1 else y_train.unsqueeze(1)
         y_val = y_val if y_val.dim() > 1 else y_val.unsqueeze(1)
+        
+        # Note: We don't move tensors to device here because DataLoader will
+        # create copies that could waste memory. Instead, we move tensors to
+        # device in training loop just before using them.
         train_dataset = TensorDataset(X_train, y_train)
         val_dataset = TensorDataset(X_val, y_val)
-    
+
         
         train_loader = DataLoader(
             train_dataset, 
@@ -201,6 +205,9 @@ class SupervisedProbeTrainer(BaseProbeTrainer):
         val_loader: Optional[DataLoader] = None,
     ) -> Dict[str, List[float]]:
         """Train model with full features including LR scheduling and progress tracking."""
+        # Ensure model is on the correct device
+        model.to(self.config.device)
+        
         optimizer = self._create_optimizer(model)
         scheduler = self._get_lr_scheduler(
             optimizer,
@@ -211,6 +218,7 @@ class SupervisedProbeTrainer(BaseProbeTrainer):
         
         # Set up loss function with class imbalance handling if needed
         if self.config.handle_class_imbalance:
+            # Move pos_weight to the correct device
             pos_weight = self._calculate_pos_weights(
                 torch.cat([y for _, y in train_loader])
             ).to(self.config.device)
@@ -360,6 +368,9 @@ class DirectionalProbeTrainer(BaseProbeTrainer):
         2. Calling the probe's fit method once
         3. Computing training and validation metrics
         """
+        # Ensure model is on the correct device
+        model.to(self.config.device)
+        
         # Accumulate all training data
         x_train, y_train = [], []
         for batch_x, batch_y in train_loader:

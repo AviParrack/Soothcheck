@@ -74,6 +74,9 @@ class ProbingDataset:
             # Add new positions
             example.character_positions.positions[key] = positions
 
+        # Update the position_types attribute with the new key
+        self.position_types.add(key)
+
     def _to_hf_dataset(self) -> Dataset:
         """Convert to HuggingFace dataset format."""
         data_dict: Dict[str, List[Optional[Union[str, int, float, List]]]] = {

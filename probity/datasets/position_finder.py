@@ -107,6 +107,7 @@ class PositionFinder:
         tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast],
         space_precedes_token: bool = True,
         add_special_tokens: bool = True,
+        padding_side: Optional[str] = None,
     ) -> int:
         """
         Convert character position to token position, handling special tokens properly.
@@ -117,21 +118,50 @@ class PositionFinder:
             tokenizer: Tokenizer to use
             space_precedes_token: Whether space precedes token (default: True)
             add_special_tokens: Whether to add special tokens (default: True)
+            padding_side: Override tokenizer's padding side (default: None, uses tokenizer.padding_side)
             
         Returns:
             Token index corresponding to the character position
         """
-        # 1) Tokenize with offset mapping
-        encoding = tokenizer(text, return_offsets_mapping=True, add_special_tokens=add_special_tokens)
-        offsets = encoding.offset_mapping  # List of (start_char, end_char) pairs
+        # Get the tokenizer's padding side (for later use in calling methods)
+        tokenizer_padding_side = padding_side if padding_side is not None else getattr(tokenizer, "padding_side", "right")
         
-        # 2) Find the token whose span covers position.start
-        for token_idx, (start_char, end_char) in enumerate(offsets):
-            if start_char <= position.start < end_char:
-                return token_idx
+        # First get clean offsets without special tokens
+        clean_encoding = tokenizer(text, return_offsets_mapping=True, add_special_tokens=False)
+        clean_offsets = clean_encoding.offset_mapping
+        clean_tokens = clean_encoding.input_ids
         
-        # If not found, either raise an error or return -1 to indicate position not found:
-        raise ValueError(f"Character position {position.start} not aligned with any token offset.")
+        # Find the token index in the clean encoding
+        clean_token_idx = None
+        for idx, (start, end) in enumerate(clean_offsets):
+            if start <= position.start < end:
+                clean_token_idx = idx
+                break
+        
+        if clean_token_idx is None:
+            raise ValueError(f"Character position {position.start} not aligned with any token offset.")
+        
+        # If we don't need to account for special tokens, just return the clean index
+        if not add_special_tokens:
+            return clean_token_idx
+        
+        # Get tokens with special tokens
+        tokens_with_special = tokenizer(text, add_special_tokens=True).input_ids
+        
+        # Otherwise, adjust for special tokens
+        # Count special tokens at the beginning
+        prefix_tokens = 0
+        if hasattr(tokenizer, "bos_token_id") and tokenizer.bos_token_id is not None:
+            prefix_tokens += 1
+        
+        # Calculate the token position with special tokens but before padding
+        position_with_special = clean_token_idx + prefix_tokens
+        
+        # Note: At this point, the position only accounts for special tokens like BOS,
+        # but not for padding. Padding is dynamic and handled at batch preparation time
+        # in get_batch_tensors.
+        
+        return position_with_special
 
     @staticmethod
     def validate_token_position(token_position: int, tokens: List[int]) -> bool:

@@ -21,7 +21,9 @@ class TransformerLensCollector:
 
     def __init__(self, config: TransformerLensConfig):
         self.config = config
+        print(f"Initializing collector with device: {config.device}")
         self.model = HookedTransformer.from_pretrained_no_processing(config.model_name)
+        print(f"Moving model to device: {config.device}")
         self.model.to(config.device)
 
     def collect(

@@ -25,6 +25,7 @@ class ProbePipelineConfig:
     model_name: Optional[str] = None
     hook_points: Optional[List[str]] = None
     activation_batch_size: int = 32
+    device: str = "cuda" if torch.cuda.is_available() else "cpu"
 
 
 class ProbePipeline(Generic[C, P]):
@@ -35,6 +36,18 @@ class ProbePipeline(Generic[C, P]):
         self.activation_stores: Optional[Dict[str, ActivationStore]] = None
         self.probe: Optional[BaseProbe] = None
         
+        # Synchronize device settings
+        if hasattr(self.config.trainer_config, 'device'):
+            # If trainer has device setting, use it for pipeline
+            self.config.device = self.config.trainer_config.device
+        else:
+            # Otherwise, update trainer and probe configs with pipeline's device
+            self.config.trainer_config.device = self.config.device
+        
+        # Ensure probe config has the same device setting
+        if hasattr(self.config.probe_config, 'device'):
+            self.config.probe_config.device = self.config.device
+        
     def _collect_activations(self) -> Dict[str, ActivationStore]:
         """Collect activations if needed."""
         if not self.config.model_name or not self.config.hook_points:
@@ -44,7 +57,8 @@ class ProbePipeline(Generic[C, P]):
             TransformerLensConfig(
                 model_name=self.config.model_name,
                 hook_points=self.config.hook_points,
-                batch_size=self.config.activation_batch_size
+                batch_size=self.config.activation_batch_size,
+                device=self.config.device
             )
         )
 
@@ -152,6 +166,8 @@ class ProbePipeline(Generic[C, P]):
             
         # Initialize probe
         self.probe = self.config.probe_cls(self.config.probe_config)
+        # Move probe to the specified device
+        self.probe.to(self.config.device)
         
         # Initialize trainer
         trainer = self.config.trainer_cls(self.config.trainer_config)

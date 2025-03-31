@@ -1,5 +1,5 @@
 # %% [markdown]
-# # Logistic Probe Testing Basics
+# # Logistic Probe Basics
 # This file demonstrates a complete workflow for:
 # 1. Creating a movie sentiment dataset
 # 2. Training a logistic regression probe
@@ -7,6 +7,9 @@
 # 4. Saving the probe to disk (in multiple formats)
 # 5. Loading the probe back from disk
 # 6. Verifying that the loaded probe gives consistent results
+
+# %% [markdown]
+# ## Setup
 
 # %% Setup and imports
 import torch
@@ -42,9 +45,14 @@ def set_seed(seed=42):
     np.random.seed(seed)
     random.seed(seed)
 
-# %%
 # Set seed for reproducibility
 set_seed(42)
+
+# %% [markdown]
+# ## Dataset Creation
+# To train our probe, we'll create a dataset similar to the one used in the paper Linear Representations of Sentiment (Tigges & Hollinsworth, et al). We will use Probity's TemplatedDataset class, which allows us to specify templates with auto-populating blanks. For convenience, we have a simple function that applies the movie sentiment template.
+#
+# Once the TemplatedDataset is created, we simply convert it to a ProbingDataset (which gives us features like labels, word positions by character, and test-train splits) and then a TokenizedProbingDataset (which gives us additional information about token positions, context length, and so forth). We keep these distinct because TokenizedProbingDatasets are tied to specific models, whereas ProbingDatasets are not.
 
 # %%
 # Create movie sentiment dataset
@@ -82,7 +90,8 @@ tokenized_dataset = TokenizedProbingDataset.from_probing_dataset(
     dataset=probing_dataset,
     tokenizer=tokenizer,
     padding=True,  # Add padding
-    max_length=128  # Specify max length
+    max_length=128,  # Specify max length
+    add_special_tokens=True
 )
 
 # %%
@@ -93,10 +102,15 @@ print("First example text:", example.text)
 
 # Now print examples from the probing dataset
 print("Sample probing dataset examples:")
-for i in range(min(6, len(probing_dataset.examples))):
+for i in np.random.choice(range(len(probing_dataset.examples)), size=min(6, len(probing_dataset.examples)), replace=False):
     ex = probing_dataset.examples[i]
     label = "positive" if ex.label == 1 else "negative"
     print(f"Example {i}: '{ex.text}' (Label: {label})")
+
+# %% [markdown]
+# ## Probe Training
+# ### Configuration
+# We're now ready to train the probe! We specify the training parameters via the three config objects below. The Pipeline manages the whole process, and the Trainer and Probe have their own settings.
 
 # %% Configure model and probe
 from probity.pipeline.pipeline import ProbePipeline, ProbePipelineConfig
@@ -107,9 +121,9 @@ hook_point = "blocks.7.hook_resid_pre"
 # Set up logistic probe configuration
 probe_config = LogisticProbeConfig(
     input_size=768,
-    normalize_weights=True,  # Normalize the learned direction
-    bias=True,  # No bias term needed for direction finding
-    model_name=model_name,  # Add these metadata fields to the config
+    normalize_weights=True,
+    bias=True,
+    model_name=model_name,
     hook_point=hook_point,
     hook_layer=7,
     name="sentiment_probe"
@@ -122,7 +136,7 @@ trainer_config = SupervisedTrainerConfig(
     num_epochs=10,
     weight_decay=0.01,
     train_ratio=0.8,  # 80-20 train-val split
-    handle_class_imbalance=True,  # Important since our classes are balanced
+    handle_class_imbalance=True,
     show_progress=True
 )
 
@@ -134,19 +148,28 @@ pipeline_config = ProbePipelineConfig(
     trainer_config=trainer_config,
     position_key="ADJ",  # We want to probe at the adjective position
     model_name=model_name,
-    hook_points=[hook_point],  # Layer 7
+    hook_points=[hook_point],
     cache_dir="./cache/sentiment_probe_cache"  # Cache activations for reuse
 )
 
 # %%
-# Add this debugging code before running the pipeline
+# Let's make sure the position key is correct
+from transformer_lens import HookedTransformer
+model = HookedTransformer.from_pretrained(model_name)
+
 example = tokenized_dataset.examples[0]
-print(f"Example text: {example.text}")
+print(f"Example text: {model.to_str_tokens(example.text, prepend_bos=False)}")
 print(f"Token positions: {example.token_positions}")
 print(f"Available position keys: {list(example.token_positions.keys())}")
 
 # Verify the position key matches what's in the dataset
 print(f"\nPipeline position key: {pipeline_config.position_key}")
+
+# %% [markdown]
+# Looks like the key tokens are in the right positions. GPT2's default behavior (as implemented in the AutoTokenizer) is not to add a BOS, so we're fine in that respect.
+#
+# ### Training
+# Let's train the probe!
 
 # %% Collect activations
 # Create and run pipeline
