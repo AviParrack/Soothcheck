@@ -15,7 +15,7 @@ Probity is a toolkit for interpretability research on neural networks, with a fo
 
 ```bash
 # Clone the repository
-git clone https://github.com/curttigges/probity.git
+git clone https://github.com/curt-tigges/probity.git
 cd probity
 
 # Install the library
