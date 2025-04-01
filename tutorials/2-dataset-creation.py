@@ -12,15 +12,13 @@
 
 # %%
 import torch
-import re
 import numpy as np
 import random
 import torch.backends
 import matplotlib.pyplot as plt
-from typing import Dict, List, Mapping, Optional, cast, Any
 
 from probity.datasets.templated import TemplatedDataset, TemplateVariable, Template
-from probity.datasets.tokenized import TokenizedProbingDataset, TokenizedProbingExample, TokenPositions
+from probity.datasets.tokenized import TokenizedProbingDataset
 from probity.datasets.base import ProbingDataset, ProbingExample, CharacterPositions
 from probity.datasets.position_finder import Position, PositionFinder
 from transformers import AutoTokenizer
@@ -126,6 +124,12 @@ question_probing_dataset = question_dataset.to_probing_dataset(
 question_mark_finder = PositionFinder.from_regex(r"\?")
 question_probing_dataset.add_target_positions(key="QUESTION_MARK", finder=question_mark_finder)
 
+
+# %% [markdown]
+# ### Dataset 1 Results
+# Below we see some random examples from the dataset, as well as the position types and some statistics.
+# These sentences are relatively short and trivial, but serve well to demonstrate the concept.
+
 # %%
 # Display dataset statistics and examples
 print(f"Dataset size: {len(question_probing_dataset.examples)}")
@@ -157,7 +161,8 @@ if question_probing_dataset.position_types:
 
 # %% [markdown]
 # ## Dataset Creation Method 2: Code vs. Not-Code Dataset
-# Now we'll create a dataset for distinguishing between code and non-code text.
+# Now we'll create a dataset for distinguishing between code and non-code text. 
+# A probe on this dataset should learn a context feature for the presence of code.
 
 # %%
 # Create code vs. not-code dataset
@@ -198,8 +203,7 @@ non_code_examples = [
 ]
 
 # Create position finder for the end of each example
-# Instead of finding the position after the last character (which doesn't align with any token),
-# let's find the last character in the text
+# PositionFinder can take a variety of inputs, including regexes, character positions, and templates
 end_finder = PositionFinder.from_regex(r"[\S].{0,1}$")
 
 # Create ProbingExamples
@@ -243,7 +247,9 @@ code_dataset = ProbingDataset(
     metadata={"description": "Code vs. non-code classification dataset"}
 )
 
-# %%
+# %% [markdown]
+# ### Dataset 2 Results
+# Once again, we can display some examples, as well as the position types and some statistics.
 
 # Display examples from the code vs. non-code dataset
 print("Code vs. Non-Code Dataset Examples:")
@@ -266,8 +272,9 @@ if code_dataset.position_types:
                     print(f"{key} position {i}: {p.start}-{p.end}")
 
 # %% [markdown]
-# ## Dataset Creation Method 3: First-Person vs Third-Person Perspective
+# ## Dataset 3: First-Person vs Third-Person Perspective
 # Now we'll create a dataset for distinguishing between first-person and third-person perspectives.
+# This method is the same as Dataset 2, but with a different approach to finding the target position.
 
 # %%
 # Create dataset for first-person vs third-person perspective
@@ -643,7 +650,12 @@ print(f"Best layer for perspective classification: {best_perspective_layer}")
 
 # %% [markdown]
 # ## Inference with Best Trained Probes
-# Now let's test our best trained probes on some new examples.
+# Now let's test our best trained probes on some new examples. Note that we've set some manual thresholds for the confidence scores to make the results more prominent.
+# However, in practice, you may want to use a more sophisticated approach to setting these thresholds (e.g. a ROC curve). Nevertheless, if you look at the results it should
+# be clear that there is a dichotomy between the classes.
+
+# You could also get the "activation in the probe direction" instead of the probability, and then use that to make predictions. This can be done with the
+# `ProbeInference.get_direction_activations()` method.
 
 # %%
 # Inference with best Question Type Probe
@@ -675,7 +687,7 @@ for i, example in enumerate(test_questions):
     print(f"\nText: {example}")
     # Get mean probability across all tokens as an overall score
     overall_score = question_probs[i].mean().item()
-    prediction = "Yes/No Question" if overall_score > 0.98 else "Open-Ended Question"
+    prediction = "Yes/No Question" if overall_score > 0.90 else "Open-Ended Question"
     confidence = max(overall_score, 1 - overall_score)
     print(f"Prediction: {prediction} (confidence: {confidence:.4f}) (overall score: {overall_score:.4f})")
 
@@ -762,7 +774,7 @@ for i, example in enumerate(test_perspective_statements):
 # probes to focus on specific parts of the input that are most relevant to the 
 # classification task:
 # 
-# - For question classification, we probed at the question mark position
+# - For question classification, we probed at the question mark position (demonstrating that models often deposit sentence-level information in punctuation at the end of a sentence or phrase)
 # - For code detection, we probed at the end of each example
 # - For perspective classification, we probed at the initial pronoun position
 # 

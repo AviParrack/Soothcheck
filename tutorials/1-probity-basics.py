@@ -13,7 +13,6 @@
 
 # %% Setup and imports
 import torch
-import json
 
 from probity.datasets.templated import TemplatedDataset
 from probity.datasets.tokenized import TokenizedProbingDataset
@@ -347,27 +346,23 @@ def standardized_inference_pattern(model_name, hook_point, probe_or_path, texts)
         inference = ProbeInference.from_saved_probe(
             model_name=model_name,
             hook_point=hook_point,
-            probe_path=probe_or_path
+            probe_path=probe_or_path,
+            device=device
         )
     else:
         # From probe object
         inference = ProbeInference(
             model_name=model_name,
             hook_point=hook_point,
-            probe=probe_or_path
+            probe=probe_or_path,
+            device=device
         )
     
     # Get probabilities (applies sigmoid for logistic probes)
     probabilities = inference.get_probabilities(texts)
     
-    # If you need raw scores instead:
-    # raw_scores = inference.get_direction_activations(texts)
-    
-    # Notes on consistency:
-    # 1. Loaded probes may produce numerical differences from original probes
-    # 2. However, the direction vectors are preserved (cosine similarity = 1.0)
-    # 3. Results show strong correlation and preserve the trend of predictions
-    # 4. For most applications, these differences don't affect conclusions
+    # If you need raw activations instead:
+    # raw_activations = inference.get_direction_activations(texts)
     
     return probabilities
 
@@ -377,23 +372,10 @@ def standardized_inference_pattern(model_name, hook_point, probe_or_path, texts)
 # %% [markdown]
 # # Conclusion
 #
-# Our tests show that the standardized probe inference approach using `ProbeInference` provides a consistent and reliable way to use probes:
-#
-# 1. **The ProbeInference class handles all probe types consistently.
-#
-# 2. **The preferred workflow is**:
+# - **The preferred workflow is**:
 #    - Train a probe (using a trainer or pipeline)
 #    - Save it with probe.save() or probe.save_json()
 #    - Load it with ProbeInference.from_saved_probe()
 #    - Use get_direction_activations() for raw scores or get_probabilities() for transformed outputs
-#
-# 3. **Saving and loading preserves**:
-#    - The exact direction vector (cosine similarity = 1.0)
-#    - The overall trend and pattern of predictions (high correlation)
-#    - Relative scores that lead to the same conclusions
-#
-# 4. **There may be numerical differences** between original and loaded probes due to implementation details, but these differences don't affect the conclusions drawn from the probes.
-#
-# This standardized approach ensures that probe inference is reproducible and consistent across different workflows.
 
 # %%

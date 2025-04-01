@@ -26,6 +26,23 @@ class TransformerLensCollector:
         print(f"Moving model to device: {config.device}")
         self.model.to(config.device)
 
+    @staticmethod
+    def get_layer_from_hook_point(hook_point: str) -> int:
+        """Extract layer number from hook point string.
+        
+        Args:
+            hook_point: Hook point string (e.g. "blocks.12.hook_resid_post")
+            
+        Returns:
+            Layer number
+        """
+        try:
+            # Extract number after "blocks."
+            layer = int(hook_point.split(".")[1])
+            return layer
+        except (IndexError, ValueError):
+            raise ValueError(f"Could not extract layer from hook point: {hook_point}")
+
     def collect(
         self,
         dataset: TokenizedProbingDataset,
@@ -39,6 +56,12 @@ class TransformerLensCollector:
 
         # Set model to evaluation mode
         self.model.eval()
+
+        # Get maximum layer needed
+        max_layer = max(
+            self.get_layer_from_hook_point(hook)
+            for hook in self.config.hook_points
+        )
 
         # Process in batches
         with torch.no_grad():  # Disable gradient computation for determinism
@@ -54,6 +77,7 @@ class TransformerLensCollector:
                     batch["input_ids"].to(self.config.device),
                     names_filter=self.config.hook_points,
                     return_cache_object=True,
+                    stop_at_layer=max_layer + 1
                 )
 
                 # Store activations for each hook point
