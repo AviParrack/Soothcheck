@@ -553,34 +553,34 @@ class KMeansProbe(DirectionalProbe[KMeansProbeConfig]):
         # Sklearn model stored internally, not part of state_dict
         self.kmeans_model: Optional[KMeans] = None
         
-    def fit(self, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+    def fit(self, x: torch.Tensor, y: Optional[torch.Tensor] = None) -> torch.Tensor:
         """Fit K-means and compute direction from centroids.
         Input x may be standardized by the trainer.
         Returns the computed direction tensor *before* potential unscaling.
         """
         if y is None:
              raise ValueError("KMeansProbe requires labels (y) to determine centroid polarity.")
-             
+
         # K-means expects float32
         x_np = x.cpu().numpy().astype(np.float32)
         y_np = y.cpu().numpy()
-        
+
         self.kmeans_model = KMeans(
             n_clusters=self.config.n_clusters,
             n_init=self.config.n_init,
             random_state=self.config.random_state,
             init='k-means++' # Specify init strategy
         )
-        
+
         # Fit K-means
         cluster_assignments = self.kmeans_model.fit_predict(x_np)
         centroids = self.kmeans_model.cluster_centers_ # Shape: [n_clusters, dim]
-        
+
         # Determine positive and negative centroids based on label correlation
         # Ensure y_np is 1D
         if y_np.ndim > 1:
              y_np = y_np.squeeze()
-             
+
         # Handle case where a cluster might be empty (highly unlikely with k-means++)
         cluster_labels_mean = np.zeros(self.config.n_clusters)
         for i in range(self.config.n_clusters):
@@ -616,7 +616,7 @@ class KMeansProbe(DirectionalProbe[KMeansProbeConfig]):
 
         pos_centroid = centroids[pos_centroid_idx]
         neg_centroid = centroids[neg_centroid_idx]
-        
+
         # Direction is from negative to positive centroid
         # This initial direction is potentially in the standardized space
         initial_direction_np = pos_centroid - neg_centroid
