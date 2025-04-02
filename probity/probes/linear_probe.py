@@ -686,6 +686,8 @@ class KMeansProbe(BaseProbe[KMeansProbeConfig]):
             random_state=config.random_state
         )
         self.direction: Optional[torch.Tensor] = None
+        self.register_buffer('feature_mean', None)
+        self.register_buffer('feature_std', None)
         
     def fit(self, x: torch.Tensor, y: torch.Tensor) -> None:
         """Fit K-means and compute direction from centroids."""
@@ -724,12 +726,16 @@ class KMeansProbe(BaseProbe[KMeansProbeConfig]):
         """Project input onto the learned direction."""
         if self.direction is None:
             raise RuntimeError("Must call fit() before forward()")
+        
+        # Apply standardization from pre-computed stats if available
+        x = self._apply_standardization(x)
+        
         x = x.to(dtype=torch.float32)
         self.direction = self.direction.to(dtype=torch.float32)
         return torch.matmul(x, self.direction)
     
     def get_direction(self, normalized: bool = True) -> torch.Tensor:
-        """Get the learned probe direction.
+        """Get the learned probe direction with proper rescaling.
         
         Args:
             normalized: Whether to normalize the direction vector to unit length
@@ -740,9 +746,30 @@ class KMeansProbe(BaseProbe[KMeansProbeConfig]):
         """
         if self.direction is None:
             raise RuntimeError("Must call fit() before get_direction()")
-        if normalized:
-            return self.direction / (torch.norm(self.direction) + 1e-8)
-        return self.direction
+            
+        direction = self.direction.clone()
+        
+        # Check if we need to apply unscaling (not needed if already unscaled)
+        additional_info = getattr(self.config, 'additional_info', {})
+        already_unscaled = additional_info.get('is_unscaled', False)
+        already_normalized = additional_info.get('is_normalized', False)
+        
+        # Unscale only if we have standardization buffers and it wasn't done already
+        if not already_unscaled and isinstance(self.feature_std, torch.Tensor):
+            # Unscale the coefficients to match standardized training
+            direction = direction / self.feature_std.squeeze()
+            
+        # Normalize if requested and needed
+        if normalized and self.config.normalize_weights and not already_normalized:
+            direction = direction / (torch.norm(direction) + 1e-8)
+        elif normalized and already_normalized:
+            # If the weight is already normalized and normalization is requested,
+            # ensure the direction has unit norm
+            norm = torch.norm(direction)
+            if not torch.allclose(norm, torch.tensor(1.0, device=direction.device)):
+                direction = direction / (norm + 1e-8)
+                
+        return direction
 
 
 class PCAProbe(BaseProbe[PCAProbeConfig]):
@@ -752,6 +779,8 @@ class PCAProbe(BaseProbe[PCAProbeConfig]):
         super().__init__(config)
         self.pca = PCA(n_components=config.n_components)
         self.direction: Optional[torch.Tensor] = None
+        self.register_buffer('feature_mean', None)
+        self.register_buffer('feature_std', None)
         
     def fit(self, x: torch.Tensor, y: torch.Tensor) -> None:
         """Fit PCA and determine direction sign based on correlation with labels."""
@@ -788,13 +817,17 @@ class PCAProbe(BaseProbe[PCAProbeConfig]):
         """Project input onto the learned direction."""
         if self.direction is None:
             raise RuntimeError("Must call fit() before forward()")
+            
+        # Apply standardization from pre-computed stats if available
+        x = self._apply_standardization(x)
+            
         # Ensure consistent dtype
         x = x.to(dtype=torch.float32)
         self.direction = self.direction.to(dtype=torch.float32)
         return torch.matmul(x, self.direction)
     
     def get_direction(self, normalized: bool = True) -> torch.Tensor:
-        """Get the learned probe direction.
+        """Get the learned probe direction with proper rescaling.
         
         Args:
             normalized: Whether to normalize the direction vector to unit length
@@ -805,9 +838,30 @@ class PCAProbe(BaseProbe[PCAProbeConfig]):
         """
         if self.direction is None:
             raise RuntimeError("Must call fit() before get_direction()")
-        if normalized:
-            return self.direction / (torch.norm(self.direction) + 1e-8)
-        return self.direction
+            
+        direction = self.direction.clone()
+        
+        # Check if we need to apply unscaling (not needed if already unscaled)
+        additional_info = getattr(self.config, 'additional_info', {})
+        already_unscaled = additional_info.get('is_unscaled', False)
+        already_normalized = additional_info.get('is_normalized', False)
+        
+        # Unscale only if we have standardization buffers and it wasn't done already
+        if not already_unscaled and isinstance(self.feature_std, torch.Tensor):
+            # Unscale the coefficients to match standardized training
+            direction = direction / self.feature_std.squeeze()
+            
+        # Normalize if requested and needed
+        if normalized and self.config.normalize_weights and not already_normalized:
+            direction = direction / (torch.norm(direction) + 1e-8)
+        elif normalized and already_normalized:
+            # If the weight is already normalized and normalization is requested,
+            # ensure the direction has unit norm
+            norm = torch.norm(direction)
+            if not torch.allclose(norm, torch.tensor(1.0, device=direction.device)):
+                direction = direction / (norm + 1e-8)
+                
+        return direction
 
 
 class MeanDifferenceProbe(BaseProbe[MeanDiffProbeConfig]):
@@ -816,6 +870,8 @@ class MeanDifferenceProbe(BaseProbe[MeanDiffProbeConfig]):
     def __init__(self, config: MeanDiffProbeConfig):
         super().__init__(config)
         self.direction: Optional[torch.Tensor] = None
+        self.register_buffer('feature_mean', None)
+        self.register_buffer('feature_std', None)
         
     def fit(self, x: torch.Tensor, y: torch.Tensor) -> None:
         """Compute direction as difference between class means."""
@@ -842,12 +898,16 @@ class MeanDifferenceProbe(BaseProbe[MeanDiffProbeConfig]):
         """Project input onto the learned direction."""
         if self.direction is None:
             raise RuntimeError("Must call fit() before forward()")
+            
+        # Apply standardization from pre-computed stats if available
+        x = self._apply_standardization(x)
+            
         x = x.to(dtype=torch.float32)
         self.direction = self.direction.to(dtype=torch.float32)
         return torch.matmul(x, self.direction)
     
     def get_direction(self, normalized: bool = True) -> torch.Tensor:
-        """Get the learned probe direction.
+        """Get the learned probe direction with proper rescaling.
         
         Args:
             normalized: Whether to normalize the direction vector to unit length
@@ -858,9 +918,30 @@ class MeanDifferenceProbe(BaseProbe[MeanDiffProbeConfig]):
         """
         if self.direction is None:
             raise RuntimeError("Must call fit() before get_direction()")
-        if normalized:
-            return self.direction / (torch.norm(self.direction) + 1e-8)
-        return self.direction
+            
+        direction = self.direction.clone()
+        
+        # Check if we need to apply unscaling (not needed if already unscaled)
+        additional_info = getattr(self.config, 'additional_info', {})
+        already_unscaled = additional_info.get('is_unscaled', False)
+        already_normalized = additional_info.get('is_normalized', False)
+        
+        # Unscale only if we have standardization buffers and it wasn't done already
+        if not already_unscaled and isinstance(self.feature_std, torch.Tensor):
+            # Unscale the coefficients to match standardized training
+            direction = direction / self.feature_std.squeeze()
+            
+        # Normalize if requested and needed
+        if normalized and self.config.normalize_weights and not already_normalized:
+            direction = direction / (torch.norm(direction) + 1e-8)
+        elif normalized and already_normalized:
+            # If the weight is already normalized and normalization is requested,
+            # ensure the direction has unit norm
+            norm = torch.norm(direction)
+            if not torch.allclose(norm, torch.tensor(1.0, device=direction.device)):
+                direction = direction / (norm + 1e-8)
+                
+        return direction
     
 # alternative implementations of logistic probe for testing
 @dataclass
