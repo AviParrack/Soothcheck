@@ -11,7 +11,13 @@ import math
 
 from probity.collection.activation_store import ActivationStore
 # Probes now expect non-standardized data for forward pass and store unscaled directions
-from probity.probes.linear_probe import BaseProbe, DirectionalProbe # Removed LinearProbeConfig
+from probity.probes.linear_probe import (
+    BaseProbe,
+    DirectionalProbe,
+    MultiClassLogisticProbe, # Add import
+    LogisticProbe,            # Added back for instanceof check
+    LinearProbe               # Added for instanceof check
+)
 
 @dataclass
 class BaseTrainerConfig:
@@ -82,6 +88,42 @@ class BaseProbeTrainer(ABC):
         num_pos = y.sum(dim=0)
         num_neg = len(y) - num_pos
         weights = num_neg / (num_pos + 1e-8)  # Add epsilon to prevent division by zero
+
+        return weights
+
+    def _calculate_class_weights(self, y: torch.Tensor, num_classes: int) -> Optional[torch.Tensor]:
+        """Calculate class weights for multi-class CrossEntropyLoss."""
+        if y.dim() == 2 and y.shape[1] == 1:
+            y = y.squeeze(1) # Convert [N, 1] to [N]
+        if y.dim() != 1:
+            print(
+                "Warning: Cannot calculate class weights for non-1D target tensor."
+            )
+            return None
+        if y.dtype != torch.long:
+            # Attempt conversion if possible, otherwise return None
+            try:
+                y = y.long()
+            except RuntimeError:
+                print(
+                    f"Warning: Cannot convert target labels of type {y.dtype} "
+                    f"to long for weight calculation."
+                )
+                return None
+
+        counts = torch.bincount(y, minlength=num_classes)
+        # Avoid division by zero for classes with zero samples
+        total_samples = counts.sum()
+        if total_samples == 0:
+            return None # No samples to calculate weights from
+
+        # Calculate weights: (total_samples / (num_classes * count_for_class))
+        # This gives higher weight to less frequent classes.
+        weights = total_samples / (num_classes * (counts + 1e-8))
+
+        # Handle cases where a class might have 0 samples (weight will be large but finite due to epsilon)
+        # Clamp weights to avoid extreme values? Optional.
+        # weights = torch.clamp(weights, min=0.1, max=10.0)
 
         return weights
 
@@ -255,6 +297,7 @@ class SupervisedProbeTrainer(BaseProbeTrainer):
         loss_fn: torch.nn.Module,
         epoch: int,
         num_epochs: int,
+        is_multi_class: bool = False, # Flag for multi-class loss
     ) -> float:
         """Run one epoch of training with progress tracking. Uses X_train for training."""
         model.train()
@@ -272,6 +315,17 @@ class SupervisedProbeTrainer(BaseProbeTrainer):
             optimizer.zero_grad()
             batch_x_train = batch_x_train.to(self.config.device)
             batch_y = batch_y.to(self.config.device)
+
+            # --- Adjust target shape/type for loss --- 
+            if is_multi_class:
+                # CrossEntropyLoss expects Long targets of shape [N]
+                if batch_y.dim() == 2 and batch_y.shape[1] == 1:
+                    batch_y = batch_y.squeeze(1)
+                batch_y = batch_y.long() # Ensure Long type
+            # BCEWithLogitsLoss expects Float targets, usually matching output shape
+            # else: # Handled by initial float conversion and loss function itself
+                # pass
+            # ----------------------------------------- 
 
             # Model forward pass uses the potentially standardized data
             outputs = model(batch_x_train)
@@ -294,11 +348,17 @@ class SupervisedProbeTrainer(BaseProbeTrainer):
         """Train model, potentially unscale direction if standardization was used."""
         # Ensure model is a BaseProbe instance
         if not isinstance(model, BaseProbe):
-             raise TypeError("SupervisedProbeTrainer expects model to be an instance of BaseProbe")
+             raise TypeError(
+                 "SupervisedProbeTrainer expects model to be an instance of BaseProbe"
+             )
 
         # Ensure model is on the correct device
         target_device = torch.device(self.config.device)
         model.to(target_device)
+
+        # Determine if this is a multi-class probe
+        is_multi_class = isinstance(model, MultiClassLogisticProbe)
+        # num_classes = model.config.output_size if hasattr(model.config, 'output_size') else 1 # Removed
 
         # Standardization stats are managed by the trainer, not transferred
 
@@ -310,14 +370,55 @@ class SupervisedProbeTrainer(BaseProbeTrainer):
             self.config.num_epochs
         )
 
-        # Set up loss function with class imbalance handling if needed
+        # --- Set up loss function --- 
+        loss_fn: nn.Module
+        all_train_y: Optional[torch.Tensor] = None
         if self.config.handle_class_imbalance:
-            # Calculate weights based on the training split labels
+            # Calculate all labels only once if needed for any weight calculation
             all_train_y = torch.cat([y for _, y, _ in train_loader])
-            pos_weight = self._calculate_pos_weights(all_train_y).to(target_device)
-            loss_fn = torch.nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+
+        if isinstance(model, MultiClassLogisticProbe):
+            weights_arg: Optional[torch.Tensor] = None
+            if self.config.handle_class_imbalance and all_train_y is not None:
+                num_classes = model.config.output_size
+                class_weights = self._calculate_class_weights(all_train_y, num_classes)
+                if class_weights is not None:
+                    weights_arg = class_weights.to(target_device)
+            # Pass `class_weights` keyword arg
+            loss_fn = model.get_loss_fn(class_weights=weights_arg)
+
+        elif isinstance(model, LogisticProbe):
+            weights_arg: Optional[torch.Tensor] = None
+            if self.config.handle_class_imbalance and all_train_y is not None:
+                pos_weight = self._calculate_pos_weights(all_train_y)
+                if pos_weight is not None:
+                    weights_arg = pos_weight.to(target_device)
+            # Pass `pos_weight` keyword arg
+            loss_fn = model.get_loss_fn(pos_weight=weights_arg)
+
+        elif isinstance(model, LinearProbe):
+            # LinearProbe loss (MSE, L1, Cosine) doesn't use these weights
+            loss_fn = model.get_loss_fn()
+            if self.config.handle_class_imbalance:
+                print(
+                    f"Warning: Class imbalance handling enabled, but may not be effective "
+                    f"for LinearProbe with loss type '{model.config.loss_type}'."
+                )
         else:
-            loss_fn = torch.nn.BCEWithLogitsLoss()
+            # Fallback for other BaseProbe types that might be supervised
+            probe_type_name = type(model).__name__
+            print(
+                f"Warning: Unknown supervised probe type '{probe_type_name}'. "
+                f"Attempting default BCEWithLogitsLoss. Ensure this is appropriate."
+            )
+            weights_arg: Optional[torch.Tensor] = None
+            if self.config.handle_class_imbalance and all_train_y is not None:
+                 pos_weight = self._calculate_pos_weights(all_train_y)
+                 if pos_weight is not None:
+                     weights_arg = pos_weight.to(target_device)
+            # Assume BCE loss for unknown types
+            loss_fn = nn.BCEWithLogitsLoss(pos_weight=weights_arg)
+        # --- End Loss Function Setup --- 
 
         # Training history
         history: Dict[str, List[float]] = {
@@ -339,13 +440,19 @@ class SupervisedProbeTrainer(BaseProbeTrainer):
         for epoch in epoch_pbar:
             # Train epoch uses X_train
             train_loss = self.train_epoch(
-                model, train_loader, optimizer, loss_fn, epoch, self.config.num_epochs
+                model,
+                train_loader,
+                optimizer,
+                loss_fn,
+                epoch,
+                self.config.num_epochs,
+                is_multi_class=is_multi_class # Pass flag
             )
             history["train_loss"].append(train_loss)
 
             # Validation uses X_orig
             if val_loader is not None:
-                val_loss = self.validate(model, val_loader, loss_fn)
+                val_loss = self.validate(model, val_loader, loss_fn, is_multi_class=is_multi_class)
                 history["val_loss"].append(val_loss)
 
                 # Early stopping check
@@ -407,7 +514,8 @@ class SupervisedProbeTrainer(BaseProbeTrainer):
         self,
         model: torch.nn.Module, # Use base Module type here
         val_loader: DataLoader,
-        loss_fn: torch.nn.Module
+        loss_fn: torch.nn.Module,
+        is_multi_class: bool = False, # Flag for multi-class loss
     ) -> float:
         """Run validation with progress tracking. Uses X_orig for validation."""
         model.eval()
@@ -417,6 +525,16 @@ class SupervisedProbeTrainer(BaseProbeTrainer):
             for _, batch_y, batch_x_orig in val_loader: # Use X_orig for validation
                 batch_x_orig = batch_x_orig.to(self.config.device)
                 batch_y = batch_y.to(self.config.device)
+
+                # --- Adjust target shape/type for loss --- 
+                if is_multi_class:
+                    # CrossEntropyLoss expects Long targets of shape [N]
+                    if batch_y.dim() == 2 and batch_y.shape[1] == 1:
+                        batch_y = batch_y.squeeze(1)
+                    batch_y = batch_y.long() # Ensure Long type
+                # else: # BCEWithLogitsLoss expects Float targets
+                    # pass 
+                # ----------------------------------------- 
 
                 # Model forward pass uses original (non-standardized) data
                 # Assumes the probe direction has been unscaled if needed after training
@@ -553,7 +671,10 @@ class DirectionalProbeTrainer(BaseProbeTrainer):
                  try:
                       y_target = y_target.view_as(preds)
                  except RuntimeError:
-                      print(f"Warning: Could not align prediction ({preds.shape}) and target ({y_target.shape}) shapes for loss calculation.")
+                      print(
+                          f"Warning: Could not align prediction ({preds.shape}) and "
+                          f"target ({y_target.shape}) shapes for loss calculation."
+                      )
                       # Fallback or skip loss calculation
                       history["train_loss"].append(float('nan'))
                       history["val_loss"].append(float('nan'))
@@ -562,11 +683,18 @@ class DirectionalProbeTrainer(BaseProbeTrainer):
             # Use BCEWithLogitsLoss as it's common for binary classification probes
             # Use original y labels
             try:
-                loss = nn.BCEWithLogitsLoss()(preds, y_target)
+                # Use the appropriate loss based on the probe type
+                if isinstance(model, MultiClassLogisticProbe):
+                    loss_fn = nn.CrossEntropyLoss()
+                    y_target = y_target.long().squeeze() # Ensure long and [N] shape
+                else:
+                    loss_fn = nn.BCEWithLogitsLoss()
+                    # y_target is already float
+
+                loss = loss_fn(preds, y_target)
                 loss_item = loss.item()
             except Exception as e:
                 print(f"Error during loss calculation: {e}")
-                loss_item = float('nan')
 
         history["train_loss"].append(loss_item)
         history["val_loss"].append(loss_item) # Use same loss for val

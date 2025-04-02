@@ -55,6 +55,13 @@ class LogisticProbeConfig(ProbeConfig):
     output_size: int = 1  # Number of output dimensions
 
 @dataclass
+class MultiClassLogisticProbeConfig(ProbeConfig):
+    """Configuration for multi-class logistic regression probe."""
+    output_size: int = 2  # Must be specified, > 1
+    normalize_weights: bool = True
+    bias: bool = True
+
+@dataclass
 class KMeansProbeConfig(ProbeConfig):
     """Configuration for K-means clustering probe."""
     n_clusters: int = 2
@@ -466,6 +473,62 @@ class LogisticProbe(BaseProbe[LogisticProbeConfig]):
             pos_weight: Optional weight for positive class (for class imbalance).
         """
         return nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+
+
+class MultiClassLogisticProbe(BaseProbe[MultiClassLogisticProbeConfig]):
+    """Multi-class logistic regression probe (Softmax Regression)."""
+
+    def __init__(self, config: MultiClassLogisticProbeConfig):
+        super().__init__(config)
+        if config.output_size <= 1:
+            raise ValueError("MultiClassLogisticProbe requires output_size > 1.")
+        self.linear = nn.Linear(config.input_size, config.output_size, bias=config.bias)
+
+        # Initialize weights
+        nn.init.zeros_(self.linear.weight)
+        if config.bias and self.linear.bias is not None:
+            nn.init.zeros_(self.linear.bias)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Forward pass. Returns logits for each class."""
+        return self.linear(x)
+
+    def _get_raw_direction_representation(self) -> torch.Tensor:
+        """Return the raw linear layer weights (weight matrix)."""
+        return self.linear.weight.data
+
+    def _set_raw_direction_representation(self, vector: torch.Tensor) -> None:
+        """Set the raw linear layer weights (weight matrix)."""
+        if self.linear.weight.shape != vector.shape:
+            raise ValueError(
+                f"Shape mismatch loading vector. Probe weight: "
+                f"{self.linear.weight.shape}, Loaded vector: {vector.shape}"
+            )
+        with torch.no_grad():
+            self.linear.weight.copy_(vector)
+
+    def get_direction(self, normalized: bool = True) -> torch.Tensor:
+        """Get the learned probe directions (weight matrix), applying normalization per class."""
+        # Start with raw weights
+        directions = self._get_raw_direction_representation().clone()
+
+        # Normalize if requested and configured
+        should_normalize = normalized and self.config.normalize_weights
+        if should_normalize:
+            # Normalize each class direction (row) independently
+            norms = torch.norm(directions, dim=1, keepdim=True)
+            directions = directions / (norms + 1e-8)
+
+        return directions # Shape [output_size, input_size]
+
+    def get_loss_fn(self, class_weights: Optional[torch.Tensor] = None) -> nn.Module:
+        """Get cross entropy loss.
+
+        Args:
+            class_weights: Optional weights for each class (for class imbalance).
+                           Shape [output_size].
+        """
+        return nn.CrossEntropyLoss(weight=class_weights)
 
 
 # --- Directional Probes (KMeans, PCA, MeanDiff) ---

@@ -2,7 +2,7 @@ import torch
 from typing import List, Optional, Union, Any
 from transformer_lens import HookedTransformer
 
-from probity.probes.linear_probe import BaseProbe
+from probity.probes.linear_probe import BaseProbe, MultiClassLogisticProbe
 
 
 class ProbeInference:
@@ -52,6 +52,10 @@ class ProbeInference:
             text = [text]
             
         # Tokenize
+        # Make sure the model has a tokenizer
+        if not hasattr(self.model, 'tokenizer') or self.model.tokenizer is None:
+            raise AttributeError("Model does not have a valid tokenizer.")
+
         tokens = self.model.tokenizer(
             text, 
             return_tensors="pt", 
@@ -115,28 +119,32 @@ class ProbeInference:
         # Reshape for batch calculation
         flat_activations = activations.view(-1, hidden_size)
         
-        # Let the probe handle standardization (don't reimplement here)
-        #if hasattr(self.probe, '_apply_standardization'):
-        #     flat_activations = self.probe._apply_standardization(flat_activations)
+        # Standardization is handled by the probe itself now
+        # #if hasattr(self.probe, '_apply_standardization'):
+        # #     flat_activations = self.probe._apply_standardization(flat_activations)
         
         # Get the probe direction (always normalized for consistency)
-        direction = self.probe.get_direction(normalized=True)
+        direction = self.probe.get_direction()
         
         # Calculate dot product with direction
         with torch.no_grad():
             # For multi-dimensional directions (rarely used)
             if direction.dim() > 1:
+                # Assuming flat_activations [B*S, D], direction [O, D]
+                # Result [B*S, O]
                 outputs = torch.matmul(flat_activations, direction.t())
             else:
                 # For single vector directions (common case)
+                # flat_activations [B*S, D], direction [D]
+                # Result [B*S]
                 outputs = torch.matmul(flat_activations, direction)
         
         # Reshape back
         if outputs.dim() > 1 and outputs.size(1) > 1:
-            # Multi-dimensional output
+            # Multi-dimensional output [B*S, O] -> [B, S, O]
             return outputs.view(batch_size, seq_len, -1).cpu()
         else:
-            # Single dimension output
+            # Single dimension output [B*S] -> [B, S]
             return outputs.view(batch_size, seq_len).cpu()
         
 
@@ -154,7 +162,7 @@ class ProbeInference:
             text: Input text or list of texts
             
         Returns:
-            Tensor of probe outputs (batch_size, seq_len)
+            Tensor of probe outputs (batch_size, seq_len, [output_dim])
         """
         # Get activations
         activations = self.get_activations(text)
@@ -169,10 +177,10 @@ class ProbeInference:
             
         # Reshape back
         if outputs.dim() > 1 and outputs.size(1) > 1:
-            # Multi-dimensional output
+            # Multi-dimensional output [B*S, O] -> [B, S, O]
             return outputs.view(batch_size, seq_len, -1).cpu()
         else:
-            # Single dimension output
+            # Single dimension output [B*S] -> [B, S]
             return outputs.view(batch_size, seq_len).cpu()
     
 
@@ -182,22 +190,27 @@ class ProbeInference:
     ) -> torch.Tensor:
         """Get probabilities from the probe.
         
-        For logistic probes, applies sigmoid to the probe outputs.
-        For other probes, returns outputs from get_probe_outputs.
+        Applies sigmoid for binary logistic probes, softmax for multi-class
+        logistic probes, and returns raw outputs otherwise.
         
         Args:
             text: Input text or list of texts
             
         Returns:
-            Tensor of probabilities (batch_size, seq_len)
+            Tensor of probabilities/outputs (batch_size, seq_len, [num_classes])
         """
         outputs = self.get_probe_outputs(text)
         
-        # Apply sigmoid for logistic probes
+        # Apply sigmoid for binary logistic probes
         logistic_probe_types = ["LogisticProbe", "SklearnLogisticProbe"]
         if self.probe_class in logistic_probe_types:
             return torch.sigmoid(outputs)
+        # Apply softmax for multi-class logistic probes
+        elif isinstance(self.probe, MultiClassLogisticProbe):
+            # Apply softmax along the class dimension (last dimension after reshape)
+            return torch.softmax(outputs, dim=-1)
         else:
+            # For other probe types, return raw outputs
             return outputs
     
     @classmethod
