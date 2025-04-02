@@ -294,7 +294,7 @@ cos_sim = torch.nn.functional.cosine_similarity(original_direction, loaded_direc
 print(f"Cosine similarity between directions: {cos_sim.item():.6f}")
 
 # Analyze where the differences are greatest
-token_diffs = torch.abs(probabilities - loaded_probabilities).mean(dim=0)
+token_diffs = torch.abs(raw_scores - loaded_raw_scores).mean(dim=0)
 print("\nToken-level mean absolute differences:")
 for i, diff in enumerate(token_diffs):
     print(f"Token {i}: {diff.item():.6f}")

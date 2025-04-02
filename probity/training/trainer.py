@@ -90,15 +90,46 @@ class BaseProbeTrainer(ABC):
         activation_store: ActivationStore,
         position_key: str,
     ) -> torch.Tensor:
-        """Prepare data for training with normalization."""
+        """Prepare data for training with normalization.
+        
+        Computes standardization statistics and transfers them to the probe model
+        to ensure consistent standardization during inference.
+        """
         X, _ = activation_store.get_probe_data(position_key)
         
+        # Compute statistics and store for later use
         if self.feature_mean is None:
             self.feature_mean = X.mean(dim=0, keepdim=True)
             self.feature_std = X.std(dim=0, keepdim=True) + 1e-8
+            
+            # Move statistics to the correct device
+            if self.config.device:
+                self.feature_mean = self.feature_mean.to(self.config.device)
+                self.feature_std = self.feature_std.to(self.config.device)
 
-        X = (X - self.feature_mean) / self.feature_std
+        # Apply standardization for training
+        if self.feature_mean is not None and self.feature_std is not None:
+            # Move X to the same device as the feature statistics
+            if hasattr(self.feature_mean, 'device'):
+                X = X.to(self.feature_mean.device)
+            X = (X - self.feature_mean) / self.feature_std
         return X
+        
+    def transfer_stats_to_model(self, model: BaseProbe) -> None:
+        """Transfer standardization statistics to the model."""
+        if hasattr(self, 'feature_mean') and self.feature_mean is not None and self.feature_std is not None:
+            # Try to get device from model parameters or use default
+            try:
+                device = next(model.parameters()).device
+            except StopIteration:
+                device = self.config.device
+                
+            feature_mean = self.feature_mean.to(device)
+            feature_std = self.feature_std.to(device)
+            
+            # Register standardization buffers with the model
+            model.register_buffer('feature_mean', feature_mean)
+            model.register_buffer('feature_std', feature_std)
 
 
 @dataclass 
@@ -208,6 +239,9 @@ class SupervisedProbeTrainer(BaseProbeTrainer):
         # Ensure model is on the correct device
         model.to(self.config.device)
         
+        # Transfer standardization statistics to model before training
+        self.transfer_stats_to_model(model)
+        
         optimizer = self._create_optimizer(model)
         scheduler = self._get_lr_scheduler(
             optimizer,
@@ -302,7 +336,7 @@ class SupervisedProbeTrainer(BaseProbeTrainer):
                 total_loss += loss.item()
         
         return total_loss / len(val_loader)
-    
+
 
 @dataclass
 class DirectionalTrainerConfig(BaseTrainerConfig):
@@ -370,6 +404,9 @@ class DirectionalProbeTrainer(BaseProbeTrainer):
         """
         # Ensure model is on the correct device
         model.to(self.config.device)
+        
+        # Transfer standardization statistics to model before training
+        self.transfer_stats_to_model(model)
         
         # Accumulate all training data
         x_train, y_train = [], []

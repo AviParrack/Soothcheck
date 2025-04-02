@@ -86,52 +86,70 @@ class BaseProbe(ABC, nn.Module, Generic[T]):
         self.name = config.name or "unnamed_probe"  # Use config name or default
         
     @abstractmethod
-    def get_direction(self) -> torch.Tensor:
-        """Get the learned probe direction."""
+    def get_direction(self, normalized: bool = True) -> torch.Tensor:
+        """Get the learned probe direction.
+        
+        Args:
+            normalized: Whether to normalize the direction vector to unit length
+                      (this won't modify stored weights, just the returned vector)
+        
+        Returns:
+            The (optionally normalized) direction vector
+        """
         pass
     
     def encode(self, acts: torch.Tensor) -> torch.Tensor:
-        """Compute dot product between activations and the probe direction vector."""
+        """Compute dot product between activations and the probe direction."""
         direction = self.get_direction()
         return torch.einsum("...d,d->...", acts, direction)
     
-    def normalize_vector(self) -> None:
-        """Normalize the probe direction to unit length."""
-        direction = self.get_direction()
-        if hasattr(self, "linear"):
-            with torch.no_grad():
-                self.linear.weight.data = torch.nn.functional.normalize(self.linear.weight.data, p=2, dim=1)
-        elif hasattr(self, "direction"):
-            self.direction = torch.nn.functional.normalize(self.direction, p=2, dim=0)
+    def _apply_standardization(self, x: torch.Tensor) -> torch.Tensor:
+        """Apply standardization if feature statistics are available.
         
+        Returns the input unchanged if feature statistics aren't available.
+        """
+        if (hasattr(self, 'feature_mean') and 
+            isinstance(self.feature_mean, torch.Tensor) and 
+            self.feature_mean is not None):
+            return (x - self.feature_mean) / self.feature_std
+        return x
+    
     def save(self, path: str) -> None:
         """Save probe state, config, and direction in a single file."""
-        # Get direction
-        direction = self.get_direction()
+        # Gather standardization buffers
+        metadata = {
+            'is_standardized': hasattr(self, 'feature_mean') and self.feature_mean is not None
+        }
         
-        # Get additional info including standardization buffers
-        additional_info = dict(self.config.additional_info)
-        if hasattr(self, 'feature_mean') and self.feature_mean is not None:
-            additional_info['feature_mean'] = self.feature_mean.cpu().numpy().tolist()
-        if hasattr(self, 'feature_std') and self.feature_std is not None:
-            additional_info['feature_std'] = self.feature_std.cpu().numpy().tolist()
-        if hasattr(self, "linear") and hasattr(self.linear, "bias") and self.linear.bias is not None:
-            additional_info['bias'] = self.linear.bias.data.cpu().numpy().tolist()
+        if metadata['is_standardized']:
+            metadata['feature_mean'] = self.feature_mean.cpu().numpy().tolist()
+            metadata['feature_std'] = self.feature_std.cpu().numpy().tolist()
             
-        # Update config with latest additional_info
-        self.config.additional_info = additional_info
+        # Add bias if present
+        if hasattr(self, "linear") and hasattr(self.linear, "bias") and self.linear.bias is not None:
+            metadata['has_bias'] = True
+            metadata['bias'] = self.linear.bias.data.cpu().numpy().tolist()
+        else:
+            metadata['has_bias'] = False
+            
+        # Update config with metadata
+        self.config.additional_info = {**self.config.additional_info, **metadata}
         
         # Save full state
         torch.save({
             'state_dict': self.state_dict(),
             'config': self.config,
-            'direction': direction.cpu(),
+            'direction': self.get_direction(normalized=False).cpu(),
             'probe_type': self.__class__.__name__
         }, path)
 
     @classmethod
     def load(cls, path: str) -> 'BaseProbe':
-        """Load probe from saved state with enhanced compatibility."""
+        """Load probe from saved state.
+        
+        The loaded probe is automatically set to evaluation mode (probe.eval())
+        to prevent recalculating feature statistics during inference.
+        """
         if path.endswith(".json"):
             # Use load_json if it's a JSON file
             return cls.load_json(path)
@@ -142,9 +160,28 @@ class BaseProbe(ABC, nn.Module, Generic[T]):
         # Create probe with the saved config
         probe = cls(data['config'])
         
-        # Load state dict if available
+        # First, restore standardization buffers if they exist in additional_info
+        # This needs to happen BEFORE loading the state dict to ensure the buffers exist
+        additional_info = getattr(data['config'], 'additional_info', {})
+        if additional_info.get('is_standardized', False):
+            if 'feature_mean' in additional_info:
+                mean_data = torch.tensor(additional_info['feature_mean'])
+                probe.register_buffer("feature_mean", mean_data)
+                
+            if 'feature_std' in additional_info:
+                std_data = torch.tensor(additional_info['feature_std'])
+                probe.register_buffer("feature_std", std_data)
+        
+        # Now load state dict if available
         if 'state_dict' in data:
-            probe.load_state_dict(data['state_dict'])
+            # Create a new state dict that doesn't include feature_mean and feature_std
+            # if they were already set from additional_info
+            if hasattr(probe, 'feature_mean') and probe.feature_mean is not None:
+                state_dict = {k: v for k, v in data['state_dict'].items() 
+                             if not k.endswith('feature_mean') and not k.endswith('feature_std')}
+                probe.load_state_dict(state_dict, strict=False)
+            else:
+                probe.load_state_dict(data['state_dict'])
         # Otherwise set direction directly
         elif 'direction' in data:
             direction = data['direction']
@@ -153,14 +190,24 @@ class BaseProbe(ABC, nn.Module, Generic[T]):
                     probe.linear.weight.data = direction.unsqueeze(0)
             else:
                 probe.direction = direction
+                
+        # Restore bias if it exists and wasn't in state_dict
+        if additional_info.get('has_bias', False) and 'bias' in additional_info:
+            if hasattr(probe, "linear") and hasattr(probe.linear, "bias"):
+                with torch.no_grad():
+                    probe.linear.bias.data = torch.tensor(additional_info['bias'])
         
-        # Set the probe name
-        probe.name = getattr(data['config'], 'name', "unnamed_probe")
+        # Set the probe to evaluation mode
+        probe.eval()
         
         return probe
 
     def save_json(self, path: str) -> None:
-        """Save probe direction and metadata as JSON."""
+        """Save probe direction and metadata as JSON.
+        
+        The saved direction is always normalized for consistency.
+        Standardization information is preserved in the metadata.
+        """
         # ensure the path ends in .json
         if not path.endswith(".json"):
             path += ".json"
@@ -168,11 +215,18 @@ class BaseProbe(ABC, nn.Module, Generic[T]):
         # ensure folder exists
         os.makedirs(os.path.dirname(path), exist_ok=True)
         
-        # Get probe direction, but without normalizing or rescaling
-        # This gets the raw linear weights so we don't apply transforms twice
-        raw_weight = self.linear.weight.data.squeeze(0).cpu()
+        # Save the raw linear weights, not the direction
+        # This ensures compatibility with the .pt format
+        if hasattr(self, "linear") and hasattr(self.linear, "weight"):
+            raw_weight = self.linear.weight.data.detach().clone().cpu()
+            if raw_weight.dim() > 1 and raw_weight.size(0) == 1:
+                # Convert the weight from shape [1, dim] to [dim] for consistency
+                raw_weight = raw_weight.squeeze(0)
+        else:
+            # Handle non-linear probes (like KMeans, PCA, etc.)
+            raw_weight = self.get_direction(normalized=False).detach().clone().cpu()
         
-        # Prepare metadata
+        # Prepare standardization info for metadata
         metadata = {
             "model_name": self.config.model_name,
             "hook_point": self.config.hook_point,
@@ -188,21 +242,24 @@ class BaseProbe(ABC, nn.Module, Generic[T]):
             "device": self.config.device,
         }
         
-        # Get additional info including standardization buffers
-        additional_info = dict(self.config.additional_info)
-        if hasattr(self, 'feature_mean') and self.feature_mean is not None:
-            additional_info['feature_mean'] = self.feature_mean.cpu().numpy().tolist()
-        if hasattr(self, 'feature_std') and self.feature_std is not None:
-            additional_info['feature_std'] = self.feature_std.cpu().numpy().tolist()
+        # Add standardization info
+        metadata['is_standardized'] = hasattr(self, 'feature_mean') and self.feature_mean is not None
+        if metadata['is_standardized']:
+            metadata['feature_mean'] = self.feature_mean.cpu().numpy().tolist()
+            metadata['feature_std'] = self.feature_std.cpu().numpy().tolist()
+            
+        # Add bias if present
         if hasattr(self, "linear") and hasattr(self.linear, "bias") and self.linear.bias is not None:
-            additional_info['bias'] = self.linear.bias.data.cpu().numpy().tolist()
-        
-        # Mark that this vector has already been normalized and unscaled
-        # This will ensure we don't reapply transformations when loading
-        additional_info['is_normalized'] = True
-        additional_info['is_unscaled'] = True
-        
-        metadata["additional_info"] = additional_info
+            metadata['has_bias'] = True
+            metadata['bias'] = self.linear.bias.data.cpu().numpy().tolist()
+        else:
+            metadata['has_bias'] = False
+            
+        # Save required information for get_direction consistency
+        additional_info = getattr(self.config, 'additional_info', {})
+        # Mark as not normalized/unscaled to use the raw weights as they are
+        metadata['is_normalized'] = False
+        metadata['is_unscaled'] = False
         
         # Save as JSON
         save_data = {
@@ -215,130 +272,91 @@ class BaseProbe(ABC, nn.Module, Generic[T]):
             
     @classmethod
     def load_json(cls, path: str, config: Optional[T] = None) -> 'BaseProbe':
-        """Load probe from JSON file with enhanced compatibility."""
+        """Load probe from JSON file.
+        
+        Args:
+            path: Path to the JSON file
+            config: Optional config to use, otherwise will create one from metadata
+            
+        Returns:
+            Loaded probe instance
+        """
         with open(path, "r") as f:
             data = json.load(f)
             
-        # Determine format and extract data
-        if "vector" in data and "metadata" in data:
-            # New JSON format
-            vector = torch.tensor(data["vector"])
-            metadata = data["metadata"]
+        # Extract data
+        vector = torch.tensor(data["vector"])
+        metadata = data["metadata"]
+        
+        # Create config if not provided
+        if config is None:
+            dim = vector.shape[0]
             
-            # Create config if not provided
-            if config is None:
-                dim = vector.shape[0]
-                
-                # Create appropriate config based on class
-                if cls.__name__ == "LinearProbe":
-                    config = LinearProbeConfig(input_size=dim)
-                elif cls.__name__ == "LogisticProbe":
-                    config = LogisticProbeConfig(input_size=dim)
-                elif cls.__name__ == "KMeansProbe":
-                    config = KMeansProbeConfig(input_size=dim)
-                elif cls.__name__ == "PCAProbe":
-                    config = PCAProbeConfig(input_size=dim)
-                elif cls.__name__ == "MeanDifferenceProbe":
-                    config = MeanDiffProbeConfig(input_size=dim)
-                else:
-                    config = ProbeConfig(input_size=dim)
-                
-                # Update config with metadata
-                config.model_name = metadata.get("model_name", "unknown_model")
-                config.hook_point = metadata.get("hook_point", "unknown_hook")
-                config.hook_layer = metadata.get("hook_layer", 0)
-                config.hook_head_index = metadata.get("hook_head_index")
-                config.name = metadata.get("vector_name", "unnamed_probe")
-                config.dataset_path = metadata.get("dataset_path")
-                config.prepend_bos = metadata.get("prepend_bos", True)
-                config.context_size = metadata.get("context_size", 128)
-                config.dtype = metadata.get("dtype", "float32")
-                config.device = metadata.get("device", "cpu")
-                config.additional_info = metadata.get("additional_info", {})
-                
-                # Add information about whether the vector is already pre-processed
-                if "is_normalized" not in config.additional_info:
-                    config.additional_info["is_normalized"] = True
-                    config.additional_info["is_unscaled"] = True
-        else:
-            # Legacy format
-            if "vectors" in data and isinstance(data["vectors"], list):
-                vector = torch.tensor(data["vectors"][0])
-            elif "direction" in data:
-                vector = torch.tensor(data["direction"])
-            elif isinstance(data, list):
-                vector = torch.tensor(data)
+            # Create appropriate config based on class
+            if cls.__name__ == "LinearProbe":
+                from probity.probes.linear_probe import LinearProbeConfig
+                config = LinearProbeConfig(input_size=dim)
+            elif cls.__name__ == "LogisticProbe":
+                from probity.probes.linear_probe import LogisticProbeConfig
+                config = LogisticProbeConfig(input_size=dim)
+            elif cls.__name__ == "KMeansProbe":
+                from probity.probes.linear_probe import KMeansProbeConfig
+                config = KMeansProbeConfig(input_size=dim)
+            elif cls.__name__ == "PCAProbe":
+                from probity.probes.linear_probe import PCAProbeConfig
+                config = PCAProbeConfig(input_size=dim)
+            elif cls.__name__ == "MeanDifferenceProbe":
+                from probity.probes.linear_probe import MeanDiffProbeConfig
+                config = MeanDiffProbeConfig(input_size=dim)
             else:
-                raise ValueError(f"Unrecognized JSON format in {path}")
-                
-            # Create a basic config if not provided
-            if config is None:
-                dim = vector.shape[0]
+                from probity.probes.linear_probe import ProbeConfig
                 config = ProbeConfig(input_size=dim)
+            
+            # Update config with metadata
+            for key in ["model_name", "hook_point", "hook_layer", "hook_head_index", 
+                       "name", "dataset_path", "prepend_bos", "context_size",
+                       "dtype", "device"]:
+                if key in metadata:
+                    setattr(config, key, metadata.get(key))
+                    
+            # Also update additional_info with is_normalized and is_unscaled flags
+            if 'is_normalized' in metadata:
+                config.additional_info['is_normalized'] = metadata['is_normalized']
+            if 'is_unscaled' in metadata:
+                config.additional_info['is_unscaled'] = metadata['is_unscaled']
         
         # Create the probe
         probe = cls(config)
         
-        # Set the vector direction
+        # Now set standardization buffers if they exist
+        if metadata.get('is_standardized', False):
+            if 'feature_mean' in metadata:
+                mean_data = torch.tensor(metadata['feature_mean'])
+                probe.register_buffer("feature_mean", mean_data)
+                
+            if 'feature_std' in metadata:
+                std_data = torch.tensor(metadata['feature_std'])
+                probe.register_buffer("feature_std", std_data)
+        
+        # Set the vector direction - For linear probes, unsqueeze to [1, dim] if needed
         if hasattr(probe, "linear"):
             with torch.no_grad():
-                # Unsqueeze and set as weight
-                probe.linear.weight.data = vector.unsqueeze(0)
+                if vector.dim() == 1:  # [dim] to [1, dim]
+                    probe.linear.weight.data = vector.unsqueeze(0)
+                else:
+                    probe.linear.weight.data = vector
                 
                 # Restore bias if it exists
-                if (hasattr(probe.linear, "bias") and probe.linear.bias is not None and 
-                    "additional_info" in metadata and "bias" in metadata["additional_info"]):
-                    bias_data = torch.tensor(metadata["additional_info"]["bias"])
+                if metadata.get('has_bias', False) and 'bias' in metadata:
+                    bias_data = torch.tensor(metadata['bias'])
                     probe.linear.bias.data = bias_data
         else:
             probe.direction = vector
         
-        # Restore feature mean and std if they exist
-        if "additional_info" in metadata:
-            if "feature_mean" in metadata["additional_info"]:
-                mean_data = torch.tensor(metadata["additional_info"]["feature_mean"])
-                probe.register_buffer("feature_mean", mean_data)
-                
-            if "feature_std" in metadata["additional_info"]:
-                std_data = torch.tensor(metadata["additional_info"]["feature_std"])
-                probe.register_buffer("feature_std", std_data)
-        
-        # Set the probe name
-        probe.name = config.name
+        # Set to evaluation mode
+        probe.eval()
         
         return probe
-    
-    # Backward compatibility
-    def to_probe_vector(
-        self, 
-        model_name: str = None,
-        hook_point: str = None,
-        hook_layer: int = None,
-        **kwargs
-    ):
-        """For backward compatibility - stores metadata and returns self."""
-        # Update config with provided values or keep existing ones
-        self.config.model_name = model_name or self.config.model_name
-        self.config.hook_point = hook_point or self.config.hook_point
-        self.config.hook_layer = hook_layer if hook_layer is not None else self.config.hook_layer
-        
-        # Get name
-        if 'name' in kwargs:
-            self.name = kwargs['name']
-            self.config.name = kwargs['name']
-            
-        # Update additional info
-        if 'additional_info' in kwargs:
-            self.config.additional_info.update(kwargs['additional_info'])
-            
-        # For backward compatibility, add feature_mean and feature_std to additional_info
-        if hasattr(self, 'feature_mean') and self.feature_mean is not None:
-            self.config.additional_info['feature_mean'] = self.feature_mean.cpu().numpy().tolist()
-        if hasattr(self, 'feature_std') and self.feature_std is not None:
-            self.config.additional_info['feature_std'] = self.feature_std.cpu().numpy().tolist()
-            
-        # For backward compatibility, return self to enable chaining
-        return self
 
 
 class ProbeSet:
@@ -484,36 +502,54 @@ class LinearProbe(BaseProbe[LinearProbeConfig]):
             nn.init.zeros_(self.linear.bias)
             
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Forward pass with standardization."""
-        if self.training and self.feature_mean is None:
-            # Compute statistics on first forward pass during training
-            self.feature_mean = x.mean(0, keepdim=True)
-            self.feature_std = x.std(0, keepdim=True) + 1e-8
-            
-        if self.feature_mean is not None:
-            x = (x - self.feature_mean) / self.feature_std
-            
+        """Forward pass with standardization.
+        
+        Uses pre-computed standardization statistics from the trainer.
+        """
+        # Apply standardization from pre-computed stats
+        x = self._apply_standardization(x)
         return self.linear(x)
     
-    def get_direction(self) -> torch.Tensor:
-        """Get the learned probe direction with proper rescaling."""
-        direction = self.linear.weight.data
+    def get_direction(self, normalized: bool = True) -> torch.Tensor:
+        """Get the learned probe direction with proper rescaling.
+        
+        Args:
+            normalized: Whether to normalize the direction vector to unit length
+                      (this won't modify stored weights, just the returned vector)
+        
+        Returns:
+            The (optionally normalized) direction vector
+        """
+        direction = self.linear.weight.data.clone()
         
         # Check if we need to apply unscaling (not needed if already unscaled)
         additional_info = getattr(self.config, 'additional_info', {})
         already_unscaled = additional_info.get('is_unscaled', False)
         already_normalized = additional_info.get('is_normalized', False)
         
-        if self.feature_std is not None and not already_unscaled:
+        # Only apply unscaling if we have standardization buffers and it wasn't done already
+        if not already_unscaled and isinstance(self.feature_std, torch.Tensor):
             # Unscale the coefficients to match standardized training
             direction = direction / self.feature_std.squeeze()
             
-        if self.config.normalize_weights and not already_normalized:
+        # Normalize if requested and needed
+        if normalized and self.config.normalize_weights and not already_normalized:
             if self.config.output_size > 1:
                 norms = torch.norm(direction, dim=1, keepdim=True)
                 direction = direction / (norms + 1e-8)
             else:
                 direction = direction / (torch.norm(direction) + 1e-8)
+        elif normalized and already_normalized:
+            # If the weight is already normalized and normalization is requested,
+            # ensure the direction has unit norm
+            if self.config.output_size > 1:
+                norms = torch.norm(direction, dim=1, keepdim=True)
+                if not torch.allclose(norms, torch.ones_like(norms)):
+                    direction = direction / (norms + 1e-8)
+            else:
+                norm = torch.norm(direction)
+                if not torch.allclose(norm, torch.tensor(1.0, device=direction.device)):
+                    direction = direction / (norm + 1e-8)
                 
         if self.config.output_size == 1:
             direction = direction.squeeze(0)
@@ -572,36 +608,54 @@ class LogisticProbe(BaseProbe[LogisticProbeConfig]):
             nn.init.zeros_(self.linear.bias)
             
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Forward pass with standardization."""
-        if self.training and self.feature_mean is None:
-            # Compute statistics on first forward pass during training
-            self.feature_mean = x.mean(0, keepdim=True)
-            self.feature_std = x.std(0, keepdim=True) + 1e-8
-            
-        if self.feature_mean is not None:
-            x = (x - self.feature_mean) / self.feature_std
-            
+        """Forward pass with standardization.
+        
+        Uses pre-computed standardization statistics from the trainer.
+        """
+        # Apply standardization from pre-computed stats
+        x = self._apply_standardization(x)
         return self.linear(x)
     
-    def get_direction(self) -> torch.Tensor:
-        """Get the learned probe direction with proper rescaling."""
-        direction = self.linear.weight.data
+    def get_direction(self, normalized: bool = True) -> torch.Tensor:
+        """Get the learned probe direction with proper rescaling.
+        
+        Args:
+            normalized: Whether to normalize the direction vector to unit length
+                      (this won't modify stored weights, just the returned vector)
+        
+        Returns:
+            The (optionally normalized) direction vector
+        """
+        direction = self.linear.weight.data.clone()
         
         # Check if we need to apply unscaling (not needed if already unscaled)
         additional_info = getattr(self.config, 'additional_info', {})
         already_unscaled = additional_info.get('is_unscaled', False)
         already_normalized = additional_info.get('is_normalized', False)
         
-        if self.feature_std is not None and not already_unscaled:
+        # Unscale only if we have standardization buffers and it wasn't done already
+        if not already_unscaled and isinstance(self.feature_std, torch.Tensor):
             # Unscale the coefficients to match standardized training
             direction = direction / self.feature_std.squeeze()
             
-        if self.config.normalize_weights and not already_normalized:
+        # Normalize if requested and needed
+        if normalized and self.config.normalize_weights and not already_normalized:
             if self.config.output_size > 1:
                 norms = torch.norm(direction, dim=1, keepdim=True)
                 direction = direction / (norms + 1e-8)
             else:
                 direction = direction / (torch.norm(direction) + 1e-8)
+        elif normalized and already_normalized:
+            # If the weight is already normalized and normalization is requested,
+            # ensure the direction has unit norm
+            if self.config.output_size > 1:
+                norms = torch.norm(direction, dim=1, keepdim=True)
+                if not torch.allclose(norms, torch.ones_like(norms)):
+                    direction = direction / (norms + 1e-8)
+            else:
+                norm = torch.norm(direction)
+                if not torch.allclose(norm, torch.tensor(1.0, device=direction.device)):
+                    direction = direction / (norm + 1e-8)
                 
         if self.config.output_size == 1:
             direction = direction.squeeze(0)
@@ -674,10 +728,20 @@ class KMeansProbe(BaseProbe[KMeansProbeConfig]):
         self.direction = self.direction.to(dtype=torch.float32)
         return torch.matmul(x, self.direction)
     
-    def get_direction(self) -> torch.Tensor:
-        """Get the learned probe direction."""
+    def get_direction(self, normalized: bool = True) -> torch.Tensor:
+        """Get the learned probe direction.
+        
+        Args:
+            normalized: Whether to normalize the direction vector to unit length
+                      (this won't modify stored weights, just the returned vector)
+        
+        Returns:
+            The (optionally normalized) direction vector
+        """
         if self.direction is None:
             raise RuntimeError("Must call fit() before get_direction()")
+        if normalized:
+            return self.direction / (torch.norm(self.direction) + 1e-8)
         return self.direction
 
 
@@ -729,10 +793,20 @@ class PCAProbe(BaseProbe[PCAProbeConfig]):
         self.direction = self.direction.to(dtype=torch.float32)
         return torch.matmul(x, self.direction)
     
-    def get_direction(self) -> torch.Tensor:
-        """Get the learned probe direction."""
+    def get_direction(self, normalized: bool = True) -> torch.Tensor:
+        """Get the learned probe direction.
+        
+        Args:
+            normalized: Whether to normalize the direction vector to unit length
+                      (this won't modify stored weights, just the returned vector)
+        
+        Returns:
+            The (optionally normalized) direction vector
+        """
         if self.direction is None:
             raise RuntimeError("Must call fit() before get_direction()")
+        if normalized:
+            return self.direction / (torch.norm(self.direction) + 1e-8)
         return self.direction
 
 
@@ -772,10 +846,20 @@ class MeanDifferenceProbe(BaseProbe[MeanDiffProbeConfig]):
         self.direction = self.direction.to(dtype=torch.float32)
         return torch.matmul(x, self.direction)
     
-    def get_direction(self) -> torch.Tensor:
-        """Get the learned probe direction."""
+    def get_direction(self, normalized: bool = True) -> torch.Tensor:
+        """Get the learned probe direction.
+        
+        Args:
+            normalized: Whether to normalize the direction vector to unit length
+                      (this won't modify stored weights, just the returned vector)
+        
+        Returns:
+            The (optionally normalized) direction vector
+        """
         if self.direction is None:
             raise RuntimeError("Must call fit() before get_direction()")
+        if normalized:
+            return self.direction / (torch.norm(self.direction) + 1e-8)
         return self.direction
     
 # alternative implementations of logistic probe for testing
@@ -829,8 +913,16 @@ class SklearnLogisticProbe(BaseProbe[SklearnLogisticProbeConfig]):
         logits = self.model.decision_function(x_np)
         return torch.tensor(logits, device=x.device)
 
-    def get_direction(self) -> torch.Tensor:
-        """Get the learned probe direction, matching paper's implementation."""
+    def get_direction(self, normalized: bool = True) -> torch.Tensor:
+        """Get the learned probe direction, matching paper's implementation.
+        
+        Args:
+            normalized: Whether to normalize the direction vector to unit length
+                      (this won't modify stored weights, just the returned vector)
+        
+        Returns:
+            The (optionally normalized) direction vector
+        """
         # Get coefficients and intercept
         coef = self.model.coef_[0]  # Shape: (input_size,)
         
@@ -841,6 +933,9 @@ class SklearnLogisticProbe(BaseProbe[SklearnLogisticProbeConfig]):
         # Convert to tensor and normalize if requested
         direction = torch.tensor(coef, device=self.config.device)
         if self.config.normalize_weights:
+            direction = direction / (torch.norm(direction) + 1e-8)
+            
+        if normalized:
             direction = direction / (torch.norm(direction) + 1e-8)
             
         return direction

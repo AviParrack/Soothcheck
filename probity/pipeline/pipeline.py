@@ -181,53 +181,6 @@ class ProbePipeline(Generic[C, P]):
         history = trainer.train(self.probe, train_loader, val_loader)
         
         return self.probe, history
-
-    def save(self, path: str) -> None:
-        """Save pipeline state."""
-        save_path = Path(path)
-        save_path.mkdir(parents=True, exist_ok=True)
-        
-        # Save probe if exists
-        if self.probe:
-            # Save in regular format for backward compatibility
-            self.probe.save(str(save_path / "probe.pt"))
-            
-            # Also save as ProbeVector if the hook_point is known
-            if self.config.model_name and self.config.hook_points:
-                try:
-                    from probity.probes.probe_vector import ProbeVector
-                    hook_point = self.config.hook_points[0]  # Use first hook point
-                    
-                    # Extract layer number correctly
-                    if "blocks." in hook_point and "." in hook_point:
-                        # Format like "blocks.7.hook_resid_pre"
-                        parts = hook_point.split(".")
-                        try:
-                            # Try to extract the number after "blocks."
-                            hook_layer = int(parts[1])
-                        except (IndexError, ValueError):
-                            # Default to 0 if parsing fails
-                            hook_layer = 0
-                    else:
-                        # Default for non-standard hook points
-                        hook_layer = 0
-                    
-                    # Convert to ProbeVector
-                    probe_vector = self.probe.to_probe_vector(
-                        model_name=self.config.model_name,
-                        hook_point=hook_point,
-                        hook_layer=hook_layer,
-                        dataset_path=getattr(self.config.dataset, "dataset_path", ""),
-                        prepend_bos=getattr(self.config.dataset, "prepend_bos", True)
-                    )
-                    
-                    # Save ProbeVector
-                    probe_vector.save(str(save_path / "probe_vector.json"))
-                except Exception as e:
-                    print(f"Could not save as ProbeVector: {e}")
-            
-        # Save config
-        torch.save(self.config, str(save_path / "config.pt"))
         
     @classmethod
     def load(cls, path: str) -> 'ProbePipeline':

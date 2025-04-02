@@ -755,7 +755,7 @@ for i, example in enumerate(test_perspective_statements):
     print(f"\nText: {example}")
     # Get mean probability across all tokens as an overall score
     overall_score = perspective_probs[i].mean().item()
-    prediction = "First-Person" if overall_score > 0.55 else "Third-Person"
+    prediction = "First-Person" if overall_score < 0.70 else "Third-Person"
     confidence = max(overall_score, 1 - overall_score)
     print(f"Prediction: {prediction} (confidence: {confidence:.4f}) (overall score: {overall_score:.4f})")
 

@@ -112,18 +112,17 @@ class ProbeInference:
         activations = self.get_activations(text)
         batch_size, seq_len, hidden_size = activations.shape
         
-        # Standardize if probe has standardization buffers
-        if hasattr(self.probe, 'feature_mean') and self.probe.feature_mean is not None:
-            activations = (activations - self.probe.feature_mean) / self.probe.feature_std
-        
-        # Get the probe direction
-        direction = self.probe.get_direction()
-        
-        # Calculate dot product with direction
         # Reshape for batch calculation
         flat_activations = activations.view(-1, hidden_size)
         
-        # Simple dot product with direction
+        # Let the probe handle standardization (don't reimplement here)
+        if hasattr(self.probe, '_apply_standardization'):
+            flat_activations = self.probe._apply_standardization(flat_activations)
+        
+        # Get the probe direction (always normalized for consistency)
+        direction = self.probe.get_direction(normalized=True)
+        
+        # Calculate dot product with direction
         with torch.no_grad():
             # For multi-dimensional directions (rarely used)
             if direction.dim() > 1:
@@ -148,7 +147,8 @@ class ProbeInference:
         """Get outputs using the probe's forward method.
         
         This uses the probe's specific forward implementation which may include
-        additional transformations beyond a simple dot product.
+        additional transformations beyond a simple dot product. The probe's forward
+        method now handles standardization internally.
         
         Args:
             text: Input text or list of texts
@@ -163,7 +163,7 @@ class ProbeInference:
         # Reshape for probe
         flat_activations = activations.view(-1, hidden_size)
         
-        # Run probe - the probe's forward method will handle standardization and bias
+        # Run probe - the probe's forward method handles all standardization internally
         with torch.no_grad():
             outputs = self.probe(flat_activations)
             
