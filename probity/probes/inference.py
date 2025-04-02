@@ -115,6 +115,9 @@ class ProbeInference:
         # Reshape for batch calculation
         flat_activations = activations.view(-1, hidden_size)
         
+        # Let the probe handle standardization (don't reimplement here)
+        #if hasattr(self.probe, '_apply_standardization'):
+        #     flat_activations = self.probe._apply_standardization(flat_activations)
         
         # Get the probe direction (always normalized for consistency)
         direction = self.probe.get_direction(normalized=True)

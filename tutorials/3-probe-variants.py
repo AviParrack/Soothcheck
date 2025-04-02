@@ -10,6 +10,7 @@
 # ## Setup
 
 # %% Setup and imports
+import os
 import torch
 import numpy as np
 import random
@@ -114,13 +115,15 @@ supervised_trainer_config = SupervisedTrainerConfig(
     train_ratio=0.8,
     handle_class_imbalance=True,
     show_progress=True,
-    device=device
+    device=device,
+    standardize_activations=True
 )
 
 # Common trainer configuration for directional probes
 directional_trainer_config = DirectionalTrainerConfig(
     batch_size=32,
-    device=device
+    device=device,
+    standardize_activations=True
 )
 
 # Dictionary to store probes and their training histories
@@ -136,7 +139,7 @@ training_histories = {}
 linear_probe_config = LinearProbeConfig(
     input_size=hidden_size,
     normalize_weights=True,
-    bias=True,
+    bias=False,
     model_name=model_name,
     hook_point=hook_point,
     hook_layer=7,
@@ -170,7 +173,7 @@ training_histories["linear"] = history
 logistic_probe_config = LogisticProbeConfig(
     input_size=hidden_size,
     normalize_weights=True,
-    bias=True,
+    bias=False,
     model_name=model_name,
     hook_point=hook_point,
     hook_layer=7,
@@ -295,6 +298,15 @@ meandiff_pipeline = ProbePipeline(meandiff_pipeline_config)
 probe, history = meandiff_pipeline.run()
 probes["meandiff"] = probe
 training_histories["meandiff"] = history
+
+# %%
+# save all probes
+save_dir = "./sentiment_probes"
+os.makedirs(save_dir, exist_ok=True)
+for probe_type, probe in probes.items():
+    json_path = f"{save_dir}/{probe_type}_probe.json"
+    probe.save_json(json_path)
+    print(f"Saved probe JSON to {json_path}")
 
 # %% [markdown]
 # ## Training History Visualization
