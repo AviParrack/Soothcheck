@@ -11,6 +11,12 @@ Probity is a toolkit for interpretability research on neural networks, with a fo
 - Training various types of probes (linear, logistic, PCA, etc.)
 - Analyzing and interpreting probe results
 
+### What Makes This Different From SKLearn?
+- Runs on Pytorch natively where applicable
+- Extensive dataset management tools, including tools for keeping track of character and token positions for labeled items
+- Built-in activation collector, using TransformerLens as a model runner (will support NNsight in the near future as well)
+- Designed for mech interp specifically
+
 ## Installation
 
 ```bash
@@ -73,7 +79,7 @@ hook_point = "blocks.7.hook_resid_pre"
 probe_config = LogisticProbeConfig(
     input_size=768,
     normalize_weights=True,
-    bias=True,
+    bias=False,
     model_name=model_name,
     hook_point=hook_point,
     hook_layer=7,
@@ -136,6 +142,7 @@ The library supports various types of probes:
 
 - **LinearProbe**: Simple linear probe with MSE loss
 - **LogisticProbe**: Probe using logistic regression (binary classification)
+- **MultiClassLogisticProbe**: Probe using logistic regression for multi-class classification
 - **PCAProbe**: Probe using principal component analysis
 - **KMeansProbe**: Probe using K-means clustering
 - **MeanDifferenceProbe**: Probe using mean differences between classes
@@ -151,10 +158,15 @@ The library supports various types of probes:
 
 See the `tutorials/` directory for comprehensive examples of using Probity:
 
-- Dataset creation and tokenization
-- Collecting activations from models
-- Training different types of probes
-- Analyzing and visualizing probe results
+- `1-probity-basics.py`: Demonstrates the basic workflow with a Logistic Probe for sentiment analysis.
+- `2-dataset-creation.py`: Shows various methods for creating templated and custom datasets.
+- `3-probe-variants.py`: Compares different probe types (Linear, Logistic, PCA, KMeans, MeanDiff).
+- `4-multiclass-probe.py`: Explains how to use the MultiClass Logistic Probe.
+
+- Dataset creation and tokenization (General topic covered in tutorials)
+- Collecting activations from models (General topic covered in tutorials)
+- Training different types of probes (General topic covered in tutorials)
+- Analyzing and visualizing probe results (General topic covered in tutorials)
 
 ## Project Structure
 
