@@ -3,6 +3,7 @@ from typing import Dict, List, Optional, Union, Set, Callable, Any
 from datasets import Dataset
 import json
 from .position_finder import Position
+import os
 
 
 @dataclass
@@ -27,7 +28,7 @@ class ProbingExample:
     label_text: str  # Original text label
     character_positions: Optional[CharacterPositions] = None
     group_id: Optional[str] = None  # For cross-validation/grouping
-    metadata: Optional[Dict] = None  # Any additional metadata
+    attributes: Optional[Dict] = None  # Additional attributes about this example (previously called metadata)
 
 
 class ProbingDataset:
@@ -39,13 +40,13 @@ class ProbingDataset:
         task_type: str = "classification",  # or "regression"
         valid_layers: Optional[List[str]] = None,
         label_mapping: Optional[Dict[str, int]] = None,
-        metadata: Optional[Dict] = None,
+        dataset_attributes: Optional[Dict] = None,  # Dataset-level attributes (previously metadata)
     ):
         self.examples = examples
         self.task_type = task_type
         self.valid_layers = valid_layers or []
         self.label_mapping = label_mapping or {}
-        self.metadata = metadata or {}
+        self.dataset_attributes = dataset_attributes or {}  # Renamed from metadata
 
         # Add position_types attribute - derived from examples
         self.position_types = set()
@@ -190,17 +191,17 @@ class ProbingDataset:
             if example.character_positions:
                 position_types.update(example.character_positions.keys())
 
-        # Save metadata
-        metadata = {
+        # Save attributes (previously metadata)
+        attributes = {
             "task_type": self.task_type,
             "valid_layers": self.valid_layers,
             "label_mapping": self.label_mapping,
-            "metadata": self.metadata,
-            "position_types": list(position_types)  # Add position_types to metadata
+            "dataset_attributes": self.dataset_attributes,  # Renamed from metadata
+            "position_types": list(position_types)  # Add position_types to attributes
         }
 
-        with open(f"{path}/metadata.json", "w") as f:
-            json.dump(metadata, f)
+        with open(f"{path}/dataset_attributes.json", "w") as f:  # Renamed from metadata.json
+            json.dump(attributes, f)
 
     @classmethod
     def load(cls, path: str) -> "ProbingDataset":
@@ -208,17 +209,23 @@ class ProbingDataset:
         # Load HF dataset
         dataset = Dataset.load_from_disk(f"{path}/hf_dataset")
 
-        # Load metadata
-        with open(f"{path}/metadata.json", "r") as f:
-            metadata = json.load(f)
+        # Try the new attributes filename first, fall back to old metadata.json for backward compatibility
+        attributes_file = f"{path}/dataset_attributes.json" if os.path.exists(f"{path}/dataset_attributes.json") else f"{path}/metadata.json"
+        
+        # Load attributes
+        with open(attributes_file, "r") as f:
+            attributes = json.load(f)
+
+        # Handle backward compatibility - if loading old file format
+        dataset_attributes_key = "dataset_attributes" if "dataset_attributes" in attributes else "metadata"
 
         return cls.from_hf_dataset(
             dataset=dataset,
-            position_types=metadata["position_types"],
-            label_mapping=metadata["label_mapping"],
-            task_type=metadata["task_type"],
-            valid_layers=metadata["valid_layers"],
-            metadata=metadata["metadata"],
+            position_types=attributes["position_types"],
+            label_mapping=attributes["label_mapping"],
+            task_type=attributes["task_type"],
+            valid_layers=attributes["valid_layers"],
+            dataset_attributes=attributes[dataset_attributes_key],
         )
 
     def train_test_split(
@@ -240,7 +247,7 @@ class ProbingDataset:
             label_mapping=self.label_mapping,
             task_type=self.task_type,
             valid_layers=self.valid_layers,
-            metadata=self.metadata,
+            dataset_attributes=self.dataset_attributes,  # Renamed from metadata
         )
 
         test = self.from_hf_dataset(
@@ -253,7 +260,7 @@ class ProbingDataset:
             label_mapping=self.label_mapping,
             task_type=self.task_type,
             valid_layers=self.valid_layers,
-            metadata=self.metadata,
+            dataset_attributes=self.dataset_attributes,  # Renamed from metadata
         )
 
         return train, test

@@ -75,7 +75,7 @@ objects = ["this concept", "these methods", "the solution", "the problem",
 question_word_var = TemplateVariable(
     name="Q_WORD",
     values=[word for lst in question_words.values() for word in lst],
-    metadata={"question_type": [k for k, v in question_words.items() for _ in v]},
+    attributes={"question_type": [k for k, v in question_words.items() for _ in v]},
     class_bound=True,
     class_key="question_type"
 )
@@ -104,18 +104,18 @@ template1 = Template(
         "VERB": verb_var,
         "OBJECT": object_var
     },
-    metadata={"task": "question_classification"}
+    attributes={"task": "question_classification"}
 )
 
 # Create the dataset
 question_dataset = TemplatedDataset(
     templates=[template1],
-    metadata={"description": "Question classification dataset"}
+    attributes={"description": "Question classification dataset"}
 )
 
 # Convert to probing dataset
 question_probing_dataset = question_dataset.to_probing_dataset(
-    label_from_metadata="question_type",
+    label_from_attributes="question_type",
     label_map={"yes_no": 1, "open_ended": 0},
     auto_add_positions=True
 )
@@ -221,7 +221,7 @@ for text in code_examples:
         label=1,  # 1 for code
         label_text="code",
         character_positions=CharacterPositions(positions_dict) if positions_dict else None,
-        metadata={"type": "code"}
+        attributes={"type": "code"}
     ))
 
 # Add non-code examples
@@ -236,7 +236,7 @@ for text in non_code_examples:
         label=0,  # 0 for non-code
         label_text="non_code",
         character_positions=CharacterPositions(positions_dict) if positions_dict else None,
-        metadata={"type": "non_code"}
+        attributes={"type": "non_code"}
     ))
 
 # Create the dataset
@@ -244,7 +244,7 @@ code_dataset = ProbingDataset(
     examples=code_vs_text_examples,
     task_type="classification",
     label_mapping={"non_code": 0, "code": 1},
-    metadata={"description": "Code vs. non-code classification dataset"}
+    dataset_attributes={"description": "Code vs. non-code classification dataset"}
 )
 
 # %% [markdown]
@@ -342,7 +342,7 @@ for text in first_person_statements:
         label=1,  # 1 for first-person
         label_text="first_person",
         character_positions=CharacterPositions(positions_dict) if positions_dict else None,
-        metadata={"perspective": "first_person"}
+        attributes={"perspective": "first_person"}
     ))
 
 # Add third-person examples
@@ -357,7 +357,7 @@ for text in third_person_statements:
         label=0,  # 0 for third-person
         label_text="third_person",
         character_positions=CharacterPositions(positions_dict) if positions_dict else None,
-        metadata={"perspective": "third_person"}
+        attributes={"perspective": "third_person"}
     ))
 
 # Create the dataset
@@ -365,7 +365,7 @@ perspective_dataset = ProbingDataset(
     examples=perspective_examples,
     task_type="classification",
     label_mapping={"third_person": 0, "first_person": 1},
-    metadata={"description": "First-person vs third-person perspective classification dataset"}
+    dataset_attributes={"description": "First-person vs third-person perspective classification dataset"}
 )
 
 # %%

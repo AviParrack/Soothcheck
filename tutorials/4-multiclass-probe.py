@@ -124,7 +124,7 @@ for word in words:
         label=label, # Numeric label (0, 1, 2, 3)
         label_text=label_text,
         character_positions=CharacterPositions(positions_dict) if positions_dict else None,
-        metadata={"start_letter": first_letter}
+        attributes={"start_letter": first_letter}
     ))
 
 # Create the ProbingDataset
@@ -132,7 +132,7 @@ start_letter_dataset = ProbingDataset(
     examples=start_letter_examples,
     task_type="classification",
     label_mapping={v: k for k, v in label_map_inv.items()}, # Store inverse map for clarity
-    metadata={"description": "Starting letter classification (A, B, C, Other)"}
+    dataset_attributes={"description": "Starting letter classification (A, B, C, Other)"}
 )
 
 # Display some examples
@@ -362,3 +362,4 @@ for i, word in enumerate(test_words):
 # - Performing inference using `ProbeInference`, where `get_probabilities` applies `softmax` to the multi-class probe outputs.
 #
 # This probe type is useful for analyzing how models represent categorical features with more than two options within their activations. 
+# %%

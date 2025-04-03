@@ -197,7 +197,7 @@ class TokenizedProbingDataset(ProbingDataset):
                 character_positions=example.character_positions,
                 token_positions=token_positions,
                 group_id=example.group_id,
-                metadata=example.metadata,
+                attributes=example.attributes,
                 tokens=padded_tokens,  # Use the full tokens with padding
                 attention_mask=attention_mask,
             )
@@ -221,7 +221,7 @@ class TokenizedProbingDataset(ProbingDataset):
             valid_layers=dataset.valid_layers,
             label_mapping=dataset.label_mapping,
             position_types=dataset.position_types,
-            metadata=dataset.metadata,
+            dataset_attributes=dataset.dataset_attributes,
         )
 
     def get_token_lengths(self) -> List[int]:
@@ -424,7 +424,7 @@ class TokenizedProbingDataset(ProbingDataset):
                     character_positions=base_ex.character_positions,
                     token_positions=token_positions,
                     group_id=base_ex.group_id,
-                    metadata=base_ex.metadata,
+                    attributes=base_ex.attributes,
                     tokens=cast(Dict[str, Any], hf_item)["tokens"],
                     attention_mask=cast(Dict[str, Any], hf_item).get("attention_mask"),
                 )
@@ -437,7 +437,7 @@ class TokenizedProbingDataset(ProbingDataset):
             valid_layers=base_dataset.valid_layers,
             label_mapping=base_dataset.label_mapping,
             position_types=base_dataset.position_types,
-            metadata=base_dataset.metadata,
+            dataset_attributes=base_dataset.dataset_attributes,
         )
         
         # Validate that positions are still valid

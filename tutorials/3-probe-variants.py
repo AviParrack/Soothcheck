@@ -80,7 +80,7 @@ movie_dataset = TemplatedDataset.from_movie_sentiment_template(
 # Convert to probing dataset with automatic position finding
 # and label mapping from sentiment metadata
 probing_dataset = movie_dataset.to_probing_dataset(
-    label_from_metadata="sentiment",
+    label_from_attributes="sentiment",
     label_map={"positive": 1, "negative": 0},
     auto_add_positions=True
 )

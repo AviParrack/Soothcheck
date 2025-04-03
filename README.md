@@ -43,20 +43,20 @@ from transformers import AutoTokenizer
 template_var = TemplateVariable(
     name="SENTIMENT", 
     values=["positive", "negative"],
-    metadata={"label": [1, 0]},
-    class_bound=True, 
-    class_key="label"
+    attributes={"label": [1, 0]},
+    class_bound=True,  # This ensures this variable is always tied to the class 
+    class_key="label"  
 )
 
 template = Template(
     template="This is a {SENTIMENT} example.",
     variables={"SENTIMENT": template_var},
-    metadata={"task": "sentiment_analysis"}
+    attributes={"task": "sentiment_analysis"}
 )
 
 dataset = TemplatedDataset(templates=[template])
 probing_dataset = dataset.to_probing_dataset(
-    label_from_metadata="label",
+    label_from_attributes="label",
     auto_add_positions=True
 )
 
@@ -163,11 +163,6 @@ See the `tutorials/` directory for comprehensive examples of using Probity:
 - `3-probe-variants.py`: Compares different probe types (Linear, Logistic, PCA, KMeans, MeanDiff).
 - `4-multiclass-probe.py`: Explains how to use the MultiClass Logistic Probe.
 
-- Dataset creation and tokenization (General topic covered in tutorials)
-- Collecting activations from models (General topic covered in tutorials)
-- Training different types of probes (General topic covered in tutorials)
-- Analyzing and visualizing probe results (General topic covered in tutorials)
-
 ## Project Structure
 
 - **probity/collection/**: Activation collection and storage
@@ -186,11 +181,7 @@ If you use Probity in your research, please cite:
 @software{probity,
   author = {Tigges, Curt},
   title = {Probity: A Toolkit for Neural Network Probing},
-  year = {2024},
+  year = {2025},
   url = {https://github.com/curttigges/probity}
 }
 ```
-
-## License
-
-MIT License, Copyright (c) 2024 Curt Tigges. See the LICENSE file for details.
