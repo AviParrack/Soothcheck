@@ -22,7 +22,7 @@ from probity.datasets.tokenized import TokenizedProbingDataset
 from probity.datasets.base import ProbingDataset, ProbingExample, CharacterPositions
 from probity.datasets.position_finder import Position, PositionFinder
 from transformers import AutoTokenizer
-from probity.probes.linear_probe import LogisticProbe, LogisticProbeConfig
+from probity.probes import LogisticProbe, LogisticProbeConfig
 from probity.training.trainer import SupervisedProbeTrainer, SupervisedTrainerConfig
 from probity.probes.inference import ProbeInference
 from probity.pipeline.pipeline import ProbePipeline, ProbePipelineConfig
@@ -59,17 +59,41 @@ set_seed(42)
 # Create question classification dataset using templates
 question_words = {
     "yes_no": ["Do", "Did", "Will", "Would", "Can"],
-    "open_ended": ["What", "Why", "How"]
+    "open_ended": ["What", "Why", "How"],
 }
 
-subjects = ["scientists", "doctors", "students", "researchers", "experts",
-            "philosophers", "historians", "engineers"]
+subjects = [
+    "scientists",
+    "doctors",
+    "students",
+    "researchers",
+    "experts",
+    "philosophers",
+    "historians",
+    "engineers",
+]
 
-verbs = ["think", "believe", "understand", "know", "observe",
-         "theorize", "hypothesize", "discover"]
+verbs = [
+    "think",
+    "believe",
+    "understand",
+    "know",
+    "observe",
+    "theorize",
+    "hypothesize",
+    "discover",
+]
 
-objects = ["this concept", "these methods", "the solution", "the problem",
-           "the results", "the experiment", "the evidence", "the analysis"]
+objects = [
+    "this concept",
+    "these methods",
+    "the solution",
+    "the problem",
+    "the results",
+    "the experiment",
+    "the evidence",
+    "the analysis",
+]
 
 # Create TemplateVariables
 question_word_var = TemplateVariable(
@@ -77,23 +101,14 @@ question_word_var = TemplateVariable(
     values=[word for lst in question_words.values() for word in lst],
     attributes={"question_type": [k for k, v in question_words.items() for _ in v]},
     class_bound=True,
-    class_key="question_type"
+    class_key="question_type",
 )
 
-subject_var = TemplateVariable(
-    name="SUBJECT",
-    values=subjects
-)
+subject_var = TemplateVariable(name="SUBJECT", values=subjects)
 
-verb_var = TemplateVariable(
-    name="VERB",
-    values=verbs
-)
+verb_var = TemplateVariable(name="VERB", values=verbs)
 
-object_var = TemplateVariable(
-    name="OBJECT",
-    values=objects
-)
+object_var = TemplateVariable(name="OBJECT", values=objects)
 
 # Create templates
 template1 = Template(
@@ -102,27 +117,28 @@ template1 = Template(
         "Q_WORD": question_word_var,
         "SUBJECT": subject_var,
         "VERB": verb_var,
-        "OBJECT": object_var
+        "OBJECT": object_var,
     },
-    attributes={"task": "question_classification"}
+    attributes={"task": "question_classification"},
 )
 
 # Create the dataset
 question_dataset = TemplatedDataset(
-    templates=[template1],
-    attributes={"description": "Question classification dataset"}
+    templates=[template1], attributes={"description": "Question classification dataset"}
 )
 
 # Convert to probing dataset
 question_probing_dataset = question_dataset.to_probing_dataset(
     label_from_attributes="question_type",
     label_map={"yes_no": 1, "open_ended": 0},
-    auto_add_positions=True
+    auto_add_positions=True,
 )
 
 # Add position finder for the question mark instead of the question word
 question_mark_finder = PositionFinder.from_regex(r"\?")
-question_probing_dataset.add_target_positions(key="QUESTION_MARK", finder=question_mark_finder)
+question_probing_dataset.add_target_positions(
+    key="QUESTION_MARK", finder=question_mark_finder
+)
 
 
 # %% [markdown]
@@ -133,10 +149,14 @@ question_probing_dataset.add_target_positions(key="QUESTION_MARK", finder=questi
 # %%
 # Display dataset statistics and examples
 print(f"Dataset size: {len(question_probing_dataset.examples)}")
-print(f"Max sequence length: {max(len(ex.text) for ex in question_probing_dataset.examples)}")
+print(
+    f"Max sequence length: {max(len(ex.text) for ex in question_probing_dataset.examples)}"
+)
 
 print("\nQuestion Classification Dataset Examples:")
-for i in np.random.choice(range(len(question_probing_dataset.examples)), size=6, replace=False):
+for i in np.random.choice(
+    range(len(question_probing_dataset.examples)), size=6, replace=False
+):
     ex = question_probing_dataset.examples[i]
     label = "yes/no question" if ex.label == 1 else "open-ended question"
     print(f"Example {i}: '{ex.text}' (Label: {label})")
@@ -146,22 +166,27 @@ sample_ex = question_probing_dataset.examples[0]
 print(f"\nPosition types: {question_probing_dataset.position_types}")
 if question_probing_dataset.position_types:
     for key in question_probing_dataset.position_types:
-        if sample_ex.character_positions and key in sample_ex.character_positions.keys():
+        if (
+            sample_ex.character_positions
+            and key in sample_ex.character_positions.keys()
+        ):
             pos = sample_ex.character_positions[key]
             if isinstance(pos, Position):
-                print(f"{key} position: {pos.start}-{pos.end} "
-                      f"('{sample_ex.text[pos.start:pos.end]}')")
+                print(
+                    f"{key} position: {pos.start}-{pos.end} "
+                    f"('{sample_ex.text[pos.start:pos.end]}')"
+                )
             else:
                 for i, p in enumerate(pos):
-                    print(f"{key} position {i}: {p.start}-{p.end} "
-                          f"('{sample_ex.text[p.start:p.end]}')")
-
-
+                    print(
+                        f"{key} position {i}: {p.start}-{p.end} "
+                        f"('{sample_ex.text[p.start:p.end]}')"
+                    )
 
 
 # %% [markdown]
 # ## Dataset Creation Method 2: Code vs. Not-Code Dataset
-# Now we'll create a dataset for distinguishing between code and non-code text. 
+# Now we'll create a dataset for distinguishing between code and non-code text.
 # A probe on this dataset should learn a context feature for the presence of code.
 
 # %%
@@ -181,7 +206,7 @@ code_examples = [
     "if x > 0 and y < 10:\n    print('Valid')",
     "while not done:\n    process()",
     "result = [i*i for i in range(10)]",
-    "def map_function(f, items):\n    return [f(x) for x in items]"
+    "def map_function(f, items):\n    return [f(x) for x in items]",
 ]
 
 non_code_examples = [
@@ -199,7 +224,7 @@ non_code_examples = [
     "Elementary, my dear Watson.",
     "The greatest glory in living lies not in never falling, but in rising every time we fall.",
     "The way to get started is to quit talking and begin doing.",
-    "You miss 100% of the shots you don't take."
+    "You miss 100% of the shots you don't take.",
 ]
 
 # Create position finder for the end of each example
@@ -215,14 +240,18 @@ for text in code_examples:
     end_pos = end_finder(text)
     if end_pos:
         positions_dict["END_POSITION"] = end_pos[0]
-    
-    code_vs_text_examples.append(ProbingExample(
-        text=text,
-        label=1,  # 1 for code
-        label_text="code",
-        character_positions=CharacterPositions(positions_dict) if positions_dict else None,
-        attributes={"type": "code"}
-    ))
+
+    code_vs_text_examples.append(
+        ProbingExample(
+            text=text,
+            label=1,  # 1 for code
+            label_text="code",
+            character_positions=(
+                CharacterPositions(positions_dict) if positions_dict else None
+            ),
+            attributes={"type": "code"},
+        )
+    )
 
 # Add non-code examples
 for text in non_code_examples:
@@ -230,21 +259,25 @@ for text in non_code_examples:
     end_pos = end_finder(text)
     if end_pos:
         positions_dict["END_POSITION"] = end_pos[0]
-    
-    code_vs_text_examples.append(ProbingExample(
-        text=text,
-        label=0,  # 0 for non-code
-        label_text="non_code",
-        character_positions=CharacterPositions(positions_dict) if positions_dict else None,
-        attributes={"type": "non_code"}
-    ))
+
+    code_vs_text_examples.append(
+        ProbingExample(
+            text=text,
+            label=0,  # 0 for non-code
+            label_text="non_code",
+            character_positions=(
+                CharacterPositions(positions_dict) if positions_dict else None
+            ),
+            attributes={"type": "non_code"},
+        )
+    )
 
 # Create the dataset
 code_dataset = ProbingDataset(
     examples=code_vs_text_examples,
     task_type="classification",
     label_mapping={"non_code": 0, "code": 1},
-    dataset_attributes={"description": "Code vs. non-code classification dataset"}
+    dataset_attributes={"description": "Code vs. non-code classification dataset"},
 )
 
 # %% [markdown]
@@ -263,7 +296,10 @@ sample_ex = code_dataset.examples[0]
 print(f"\nPosition types: {code_dataset.position_types}")
 if code_dataset.position_types:
     for key in code_dataset.position_types:
-        if sample_ex.character_positions and key in sample_ex.character_positions.keys():
+        if (
+            sample_ex.character_positions
+            and key in sample_ex.character_positions.keys()
+        ):
             pos = sample_ex.character_positions[key]
             if isinstance(pos, Position):
                 print(f"{key} position: {pos.start}-{pos.end}")
@@ -298,7 +334,7 @@ first_person_statements = [
     "I plan to learn a new language next year.",
     "I question many assumptions about human nature.",
     "I value honesty above all other qualities.",
-    "I imagine a world without poverty or hunger."
+    "I imagine a world without poverty or hunger.",
 ]
 
 third_person_statements = [
@@ -321,7 +357,7 @@ third_person_statements = [
     "They plan to learn a new language next year.",
     "He questions many assumptions about human nature.",
     "She values honesty above all other qualities.",
-    "They imagine a world without poverty or hunger."
+    "They imagine a world without poverty or hunger.",
 ]
 
 # Create position finder for the beginning pronoun (I, He, She, They)
@@ -336,14 +372,18 @@ for text in first_person_statements:
     pronoun_pos = pronoun_finder(text)
     if pronoun_pos:
         positions_dict["PRONOUN_POSITION"] = pronoun_pos[0]
-    
-    perspective_examples.append(ProbingExample(
-        text=text,
-        label=1,  # 1 for first-person
-        label_text="first_person",
-        character_positions=CharacterPositions(positions_dict) if positions_dict else None,
-        attributes={"perspective": "first_person"}
-    ))
+
+    perspective_examples.append(
+        ProbingExample(
+            text=text,
+            label=1,  # 1 for first-person
+            label_text="first_person",
+            character_positions=(
+                CharacterPositions(positions_dict) if positions_dict else None
+            ),
+            attributes={"perspective": "first_person"},
+        )
+    )
 
 # Add third-person examples
 for text in third_person_statements:
@@ -351,28 +391,36 @@ for text in third_person_statements:
     pronoun_pos = pronoun_finder(text)
     if pronoun_pos:
         positions_dict["PRONOUN_POSITION"] = pronoun_pos[0]
-    
-    perspective_examples.append(ProbingExample(
-        text=text,
-        label=0,  # 0 for third-person
-        label_text="third_person",
-        character_positions=CharacterPositions(positions_dict) if positions_dict else None,
-        attributes={"perspective": "third_person"}
-    ))
+
+    perspective_examples.append(
+        ProbingExample(
+            text=text,
+            label=0,  # 0 for third-person
+            label_text="third_person",
+            character_positions=(
+                CharacterPositions(positions_dict) if positions_dict else None
+            ),
+            attributes={"perspective": "third_person"},
+        )
+    )
 
 # Create the dataset
 perspective_dataset = ProbingDataset(
     examples=perspective_examples,
     task_type="classification",
     label_mapping={"third_person": 0, "first_person": 1},
-    dataset_attributes={"description": "First-person vs third-person perspective classification dataset"}
+    dataset_attributes={
+        "description": "First-person vs third-person perspective classification dataset"
+    },
 )
 
 # %%
 
 # Display examples from the perspective dataset
 print("First-Person vs Third-Person Dataset Examples:")
-for i in np.random.choice(range(len(perspective_dataset.examples)), size=6, replace=False):
+for i in np.random.choice(
+    range(len(perspective_dataset.examples)), size=6, replace=False
+):
     ex = perspective_dataset.examples[i]
     label = "first-person" if ex.label == 1 else "third-person"
     print(f"Example {i}: '{ex.text}' (Label: {label})")
@@ -382,15 +430,22 @@ sample_ex = perspective_dataset.examples[0]
 print(f"\nPosition types: {perspective_dataset.position_types}")
 if perspective_dataset.position_types:
     for key in perspective_dataset.position_types:
-        if sample_ex.character_positions and key in sample_ex.character_positions.keys():
+        if (
+            sample_ex.character_positions
+            and key in sample_ex.character_positions.keys()
+        ):
             pos = sample_ex.character_positions[key]
             if isinstance(pos, Position):
-                print(f"{key} position: {pos.start}-{pos.end} "
-                      f"('{sample_ex.text[pos.start:pos.end]}')")
+                print(
+                    f"{key} position: {pos.start}-{pos.end} "
+                    f"('{sample_ex.text[pos.start:pos.end]}')"
+                )
             else:
                 for i, p in enumerate(pos):
-                    print(f"{key} position {i}: {p.start}-{p.end} "
-                          f"('{sample_ex.text[p.start:p.end]}')")
+                    print(
+                        f"{key} position {i}: {p.start}-{p.end} "
+                        f"('{sample_ex.text[p.start:p.end]}')"
+                    )
 
 # %% [markdown]
 # ## Tokenization
@@ -407,11 +462,13 @@ tokenized_question_dataset = TokenizedProbingDataset.from_probing_dataset(
     tokenizer=tokenizer,
     padding="max_length",
     max_length=12,
-    add_special_tokens=True
+    add_special_tokens=True,
 )
 print("\nQuestion Dataset:")
 print(f"Dataset size: {len(tokenized_question_dataset.examples)}")
-print(f"Max token length: {max(len(ex.tokens) for ex in tokenized_question_dataset.examples)}")
+print(
+    f"Max token length: {max(len(ex.tokens) for ex in tokenized_question_dataset.examples)}"
+)
 
 # Tokenize the code dataset
 tokenized_code_dataset = TokenizedProbingDataset.from_probing_dataset(
@@ -419,11 +476,13 @@ tokenized_code_dataset = TokenizedProbingDataset.from_probing_dataset(
     tokenizer=tokenizer,
     padding="max_length",
     max_length=128,  # Longer max_length for code examples
-    add_special_tokens=True
+    add_special_tokens=True,
 )
 print("\nCode Dataset:")
 print(f"Dataset size: {len(tokenized_code_dataset.examples)}")
-print(f"Max token length: {max(len(ex.tokens) for ex in tokenized_code_dataset.examples)}")
+print(
+    f"Max token length: {max(len(ex.tokens) for ex in tokenized_code_dataset.examples)}"
+)
 
 # Tokenize the perspective dataset
 tokenized_perspective_dataset = TokenizedProbingDataset.from_probing_dataset(
@@ -431,11 +490,13 @@ tokenized_perspective_dataset = TokenizedProbingDataset.from_probing_dataset(
     tokenizer=tokenizer,
     padding="max_length",
     max_length=24,
-    add_special_tokens=True
+    add_special_tokens=True,
 )
 print("\nPerspective Dataset:")
 print(f"Dataset size: {len(tokenized_perspective_dataset.examples)}")
-print(f"Max token length: {max(len(ex.tokens) for ex in tokenized_perspective_dataset.examples)}")
+print(
+    f"Max token length: {max(len(ex.tokens) for ex in tokenized_perspective_dataset.examples)}"
+)
 
 # %% [markdown]
 # ## Probe Training
@@ -462,7 +523,7 @@ trainer_config = SupervisedTrainerConfig(
     train_ratio=0.7,  # 70-30 train-val split
     handle_class_imbalance=True,
     show_progress=True,
-    device=device
+    device=device,
 )
 
 # %% Train question type probes across multiple layers
@@ -470,8 +531,8 @@ question_probes = {}
 question_training_histories = {}
 
 for hook_point in hook_points:
-    layer = int(hook_point.split('.')[1])
-    
+    layer = int(hook_point.split(".")[1])
+
     # Set up probe configuration
     question_probe_config = LogisticProbeConfig(
         input_size=hidden_size,  # Use dynamically determined hidden size
@@ -480,9 +541,9 @@ for hook_point in hook_points:
         model_name=model_name,
         hook_point=hook_point,
         hook_layer=layer,
-        name=f"question_type_probe_layer_{layer}"
+        name=f"question_type_probe_layer_{layer}",
     )
-    
+
     # Create pipeline config
     question_pipeline_config = ProbePipelineConfig(
         dataset=tokenized_question_dataset,
@@ -493,14 +554,14 @@ for hook_point in hook_points:
         position_key="QUESTION_MARK",  # Changed from Q_WORD to QUESTION_MARK
         model_name=model_name,
         hook_points=[hook_point],
-        cache_dir=f"./cache/question_probe_cache_layer_{layer}"
+        cache_dir=f"./cache/question_probe_cache_layer_{layer}",
     )
-    
+
     # Train the probe
     print(f"Training Question Type Probe for layer {layer}...")
     question_pipeline: ProbePipeline = ProbePipeline(question_pipeline_config)
     probe, history = question_pipeline.run()
-    
+
     # Store results
     question_probes[layer] = probe
     question_training_histories[layer] = history
@@ -511,8 +572,8 @@ code_probes = {}
 code_training_histories = {}
 
 for hook_point in hook_points:
-    layer = int(hook_point.split('.')[1])
-    
+    layer = int(hook_point.split(".")[1])
+
     # Set up probe configuration
     code_probe_config = LogisticProbeConfig(
         input_size=hidden_size,  # Use dynamically determined hidden size
@@ -521,9 +582,9 @@ for hook_point in hook_points:
         model_name=model_name,
         hook_point=hook_point,
         hook_layer=layer,
-        name=f"code_probe_layer_{layer}"
+        name=f"code_probe_layer_{layer}",
     )
-    
+
     # Create pipeline config
     code_pipeline_config = ProbePipelineConfig(
         dataset=tokenized_code_dataset,
@@ -534,14 +595,14 @@ for hook_point in hook_points:
         position_key="END_POSITION",  # Probe at the end of the example
         model_name=model_name,
         hook_points=[hook_point],
-        cache_dir=f"./cache/code_probe_cache_layer_{layer}"
+        cache_dir=f"./cache/code_probe_cache_layer_{layer}",
     )
-    
+
     # Train the probe
     print(f"Training Code Detection Probe for layer {layer}...")
     code_pipeline: ProbePipeline = ProbePipeline(code_pipeline_config)
     probe, history = code_pipeline.run()
-    
+
     # Store results
     code_probes[layer] = probe
     code_training_histories[layer] = history
@@ -551,8 +612,8 @@ perspective_probes = {}
 perspective_training_histories = {}
 
 for hook_point in hook_points:
-    layer = int(hook_point.split('.')[1])
-    
+    layer = int(hook_point.split(".")[1])
+
     # Set up probe configuration
     perspective_probe_config = LogisticProbeConfig(
         input_size=hidden_size,  # Use dynamically determined hidden size
@@ -561,9 +622,9 @@ for hook_point in hook_points:
         model_name=model_name,
         hook_point=hook_point,
         hook_layer=layer,
-        name=f"perspective_probe_layer_{layer}"
+        name=f"perspective_probe_layer_{layer}",
     )
-    
+
     # Create pipeline config
     perspective_pipeline_config = ProbePipelineConfig(
         dataset=tokenized_perspective_dataset,
@@ -574,14 +635,14 @@ for hook_point in hook_points:
         position_key="PRONOUN_POSITION",  # Probe at the pronoun position
         model_name=model_name,
         hook_points=[hook_point],
-        cache_dir=f"./cache/perspective_probe_cache_layer_{layer}"
+        cache_dir=f"./cache/perspective_probe_cache_layer_{layer}",
     )
-    
+
     # Train the probe
     print(f"Training Perspective Probe for layer {layer}...")
     perspective_pipeline: ProbePipeline = ProbePipeline(perspective_pipeline_config)
     probe, history = perspective_pipeline.run()
-    
+
     # Store results
     perspective_probes[layer] = probe
     perspective_training_histories[layer] = history
@@ -592,32 +653,32 @@ plt.figure(figsize=(15, 20))
 # Plot question probe training histories
 plt.subplot(3, 1, 1)
 for layer, history in question_training_histories.items():
-    plt.plot(history['train_loss'], label=f'Layer {layer} Train')
-    plt.plot(history['val_loss'], label=f'Layer {layer} Val', linestyle='--')
-plt.xlabel('Epoch')
-plt.ylabel('Loss') 
-plt.title('Question Type Probe Training History Across Layers')
-plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+    plt.plot(history["train_loss"], label=f"Layer {layer} Train")
+    plt.plot(history["val_loss"], label=f"Layer {layer} Val", linestyle="--")
+plt.xlabel("Epoch")
+plt.ylabel("Loss")
+plt.title("Question Type Probe Training History Across Layers")
+plt.legend(bbox_to_anchor=(1.05, 1), loc="upper left")
 
 # Plot code probe training histories
 plt.subplot(3, 1, 2)
 for layer, history in code_training_histories.items():
-    plt.plot(history['train_loss'], label=f'Layer {layer} Train')
-    plt.plot(history['val_loss'], label=f'Layer {layer} Val', linestyle='--')
-plt.xlabel('Epoch')
-plt.ylabel('Loss')
-plt.title('Code Detection Probe Training History Across Layers')
-plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+    plt.plot(history["train_loss"], label=f"Layer {layer} Train")
+    plt.plot(history["val_loss"], label=f"Layer {layer} Val", linestyle="--")
+plt.xlabel("Epoch")
+plt.ylabel("Loss")
+plt.title("Code Detection Probe Training History Across Layers")
+plt.legend(bbox_to_anchor=(1.05, 1), loc="upper left")
 
 # Plot perspective probe training histories
 plt.subplot(3, 1, 3)
 for layer, history in perspective_training_histories.items():
-    plt.plot(history['train_loss'], label=f'Layer {layer} Train')
-    plt.plot(history['val_loss'], label=f'Layer {layer} Val', linestyle='--')
-plt.xlabel('Epoch')
-plt.ylabel('Loss')
-plt.title('Perspective Probe Training History Across Layers')
-plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+    plt.plot(history["train_loss"], label=f"Layer {layer} Train")
+    plt.plot(history["val_loss"], label=f"Layer {layer} Val", linestyle="--")
+plt.xlabel("Epoch")
+plt.ylabel("Loss")
+plt.title("Perspective Probe Training History Across Layers")
+plt.legend(bbox_to_anchor=(1.05, 1), loc="upper left")
 
 plt.tight_layout()
 plt.show()
@@ -626,23 +687,26 @@ plt.show()
 layer_results = {}
 
 for task, histories in [
-    ("question_type", question_training_histories), 
+    ("question_type", question_training_histories),
     ("code_detection", code_training_histories),
-    ("perspective", perspective_training_histories)
+    ("perspective", perspective_training_histories),
 ]:
     layer_results[task] = {}
     for layer, history in histories.items():
         # Use the final validation loss as the metric
-        final_val_loss = history['val_loss'][-1]
+        final_val_loss = history["val_loss"][-1]
         layer_results[task][layer] = final_val_loss
 
 # Find the best layer for each task
-best_question_layer = min(layer_results["question_type"], 
-                         key=lambda k: layer_results["question_type"][k])
-best_code_layer = min(layer_results["code_detection"], 
-                     key=lambda k: layer_results["code_detection"][k])
-best_perspective_layer = min(layer_results["perspective"], 
-                            key=lambda k: layer_results["perspective"][k])
+best_question_layer = min(
+    layer_results["question_type"], key=lambda k: layer_results["question_type"][k]
+)
+best_code_layer = min(
+    layer_results["code_detection"], key=lambda k: layer_results["code_detection"][k]
+)
+best_perspective_layer = min(
+    layer_results["perspective"], key=lambda k: layer_results["perspective"][k]
+)
 
 print(f"Best layer for question type classification: {best_question_layer}")
 print(f"Best layer for code detection: {best_code_layer}")
@@ -664,7 +728,7 @@ question_inference = ProbeInference(
     model_name=model_name,
     hook_point=best_hook_point,
     probe=question_probes[best_question_layer],
-    device=device
+    device=device,
 )
 
 # Create some test examples
@@ -674,7 +738,7 @@ test_questions = [
     "What factors contribute to climate change?",
     "How do quantum computers work?",
     "Will humans colonize Mars within this century?",
-    "Where should I go for my next vacation?"
+    "Where should I go for my next vacation?",
 ]
 
 # Get probabilities (applies sigmoid for logistic probes)
@@ -689,7 +753,9 @@ for i, example in enumerate(test_questions):
     overall_score = question_probs[i].mean().item()
     prediction = "Yes/No Question" if overall_score > 0.90 else "Open-Ended Question"
     confidence = max(overall_score, 1 - overall_score)
-    print(f"Prediction: {prediction} (confidence: {confidence:.4f}) (overall score: {overall_score:.4f})")
+    print(
+        f"Prediction: {prediction} (confidence: {confidence:.4f}) (overall score: {overall_score:.4f})"
+    )
 
 # %%
 # Inference with best Code Detection Probe
@@ -698,7 +764,7 @@ code_inference = ProbeInference(
     model_name=model_name,
     hook_point=best_hook_point,
     probe=code_probes[best_code_layer],
-    device=device
+    device=device,
 )
 
 # Create some test examples
@@ -708,7 +774,7 @@ test_code_examples = [
     "def fibonacci(n):\n    a, b = 0, 1\n    for _ in range(n):\n        a, b = b, a + b\n    return a",
     "The early bird catches the worm, but the second mouse gets the cheese.",
     "x = 5\ny = 10\nprint(x + y)",
-    "Four score and seven years ago our fathers brought forth on this continent a new nation."
+    "Four score and seven years ago our fathers brought forth on this continent a new nation.",
 ]
 
 # Get probabilities (applies sigmoid for logistic probes)
@@ -723,7 +789,9 @@ for i, example in enumerate(test_code_examples):
     overall_score = code_probs[i].mean().item()
     prediction = "Code" if overall_score > 0.5 else "Not Code"
     confidence = max(overall_score, 1 - overall_score)
-    print(f"Prediction: {prediction} (confidence: {confidence:.4f}) (overall score: {overall_score:.4f})")
+    print(
+        f"Prediction: {prediction} (confidence: {confidence:.4f}) (overall score: {overall_score:.4f})"
+    )
 
 # %%
 # Inference with best Perspective Probe
@@ -732,7 +800,7 @@ perspective_inference = ProbeInference(
     model_name=model_name,
     hook_point=best_hook_point,
     probe=perspective_probes[best_perspective_layer],
-    device=device
+    device=device,
 )
 
 # Create some test examples
@@ -742,7 +810,7 @@ test_perspective_statements = [
     "I don't think this approach will work in practice.",
     "They don't think this approach will work in practice.",
     "I always wanted to visit the Grand Canyon.",
-    "He always wanted to visit the Grand Canyon."
+    "He always wanted to visit the Grand Canyon.",
 ]
 
 # Get probabilities (applies sigmoid for logistic probes)
@@ -757,33 +825,35 @@ for i, example in enumerate(test_perspective_statements):
     overall_score = perspective_probs[i].mean().item()
     prediction = "First-Person" if overall_score < 0.70 else "Third-Person"
     confidence = max(overall_score, 1 - overall_score)
-    print(f"Prediction: {prediction} (confidence: {confidence:.4f}) (overall score: {overall_score:.4f})")
+    print(
+        f"Prediction: {prediction} (confidence: {confidence:.4f}) (overall score: {overall_score:.4f})"
+    )
 
 # %% [markdown]
 # ## Conclusion
-# 
+#
 # This tutorial demonstrated multiple approaches to creating datasets with Probity:
-# 
-# 1. Using the **TemplatedDataset** class to create structured datasets with predefined 
+#
+# 1. Using the **TemplatedDataset** class to create structured datasets with predefined
 #    patterns and variables - demonstrated with our question type classification dataset.
-# 
-# 2. Creating **non-templated datasets** directly using ProbingExample objects, as 
+#
+# 2. Creating **non-templated datasets** directly using ProbingExample objects, as
 #    shown with our code detection and perspective classification datasets.
-# 
+#
 # In all cases, we ensured that position information was carefully tracked, allowing our
-# probes to focus on specific parts of the input that are most relevant to the 
+# probes to focus on specific parts of the input that are most relevant to the
 # classification task:
-# 
+#
 # - For question classification, we probed at the question mark position (demonstrating that models often deposit sentence-level information in punctuation at the end of a sentence or phrase)
 # - For code detection, we probed at the end of each example
 # - For perspective classification, we probed at the initial pronoun position
-# 
+#
 # The results show that:
-# 
+#
 # - Different tasks are best probed from different layers
 # - Models encode rich semantic information that can be extracted with linear probes
 # - Position-specific probing often gives better insights than whole-sequence probing
-# 
+#
 # For your own projects, consider which dataset creation approach best suits your needs
 # based on the structure and source of your data, and carefully select positions that
 # are most relevant to your probing task.

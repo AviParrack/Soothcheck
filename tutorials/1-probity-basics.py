@@ -23,7 +23,7 @@ import torch.backends
 # Probity imports
 from probity.datasets.templated import TemplatedDataset
 from probity.datasets.tokenized import TokenizedProbingDataset
-from probity.probes.linear_probe import LogisticProbe, LogisticProbeConfig
+from probity.probes import LogisticProbe, LogisticProbeConfig
 from probity.training.trainer import SupervisedProbeTrainer, SupervisedTrainerConfig
 from probity.probes.inference import ProbeInference
 from probity.pipeline.pipeline import ProbePipeline, ProbePipelineConfig
@@ -512,7 +512,7 @@ probe_direction = probe_direction.tolist()
 from neuronpedia.np_vector import NPVector
 
 # from neuronpedia.org/account
-os.environ["NEURONPEDIA_API_KEY"] = "43d961a6-c4d2-4ccf-8565-9c915813e65c"
+os.environ["NEURONPEDIA_API_KEY"] = "YOUR_API_KEY"
 
 # upload the custom vector
 np_vector = NPVector.new(

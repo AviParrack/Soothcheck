@@ -13,7 +13,7 @@ import math
 from probity.collection.activation_store import ActivationStore
 
 # Probes now expect non-standardized data for forward pass and store unscaled directions
-from probity.probes.linear_probe import (
+from probity.probes import (
     BaseProbe,
     DirectionalProbe,
     MultiClassLogisticProbe,  # Add import

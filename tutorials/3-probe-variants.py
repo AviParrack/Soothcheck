@@ -21,14 +21,24 @@ from tabulate import tabulate
 from probity.datasets.templated import TemplatedDataset
 from probity.datasets.tokenized import TokenizedProbingDataset
 from transformers import AutoTokenizer
-from probity.probes.linear_probe import (
-    LinearProbe, LinearProbeConfig,
-    LogisticProbe, LogisticProbeConfig,
-    KMeansProbe, KMeansProbeConfig,
-    PCAProbe, PCAProbeConfig,
-    MeanDifferenceProbe, MeanDiffProbeConfig
+from probity.probes import (
+    LinearProbe,
+    LinearProbeConfig,
+    LogisticProbe,
+    LogisticProbeConfig,
+    KMeansProbe,
+    KMeansProbeConfig,
+    PCAProbe,
+    PCAProbeConfig,
+    MeanDifferenceProbe,
+    MeanDiffProbeConfig,
 )
-from probity.training.trainer import SupervisedProbeTrainer, SupervisedTrainerConfig, DirectionalProbeTrainer, DirectionalTrainerConfig
+from probity.training.trainer import (
+    SupervisedProbeTrainer,
+    SupervisedTrainerConfig,
+    DirectionalProbeTrainer,
+    DirectionalTrainerConfig,
+)
 from probity.pipeline.pipeline import ProbePipeline, ProbePipelineConfig
 from probity.probes.inference import ProbeInference
 
@@ -41,6 +51,7 @@ else:
     device = "cpu"
 print(f"Using device: {device}")
 
+
 def set_seed(seed=42):
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
@@ -48,6 +59,7 @@ def set_seed(seed=42):
     torch.backends.cudnn.benchmark = False
     np.random.seed(seed)
     random.seed(seed)
+
 
 # Set seed for reproducibility
 set_seed(42)
@@ -59,22 +71,47 @@ set_seed(42)
 # %%
 # Create movie sentiment dataset
 adjectives = {
-    "positive": ["incredible", "amazing", "fantastic", "awesome", "beautiful", 
-                "brilliant", "exceptional", "extraordinary", "fabulous", "great", 
-                "lovely", "outstanding", "remarkable", "wonderful"],
-    "negative": ["terrible", "awful", "horrible", "bad", "disappointing", 
-                "disgusting", "dreadful", "horrendous", "mediocre", "miserable", 
-                "offensive", "terrible", "unpleasant", "wretched"]
+    "positive": [
+        "incredible",
+        "amazing",
+        "fantastic",
+        "awesome",
+        "beautiful",
+        "brilliant",
+        "exceptional",
+        "extraordinary",
+        "fabulous",
+        "great",
+        "lovely",
+        "outstanding",
+        "remarkable",
+        "wonderful",
+    ],
+    "negative": [
+        "terrible",
+        "awful",
+        "horrible",
+        "bad",
+        "disappointing",
+        "disgusting",
+        "dreadful",
+        "horrendous",
+        "mediocre",
+        "miserable",
+        "offensive",
+        "terrible",
+        "unpleasant",
+        "wretched",
+    ],
 }
 verbs = {
     "positive": ["loved", "enjoyed", "adored"],
-    "negative": ["hated", "disliked", "detested"]
+    "negative": ["hated", "disliked", "detested"],
 }
 
 # Create dataset using factory method
 movie_dataset = TemplatedDataset.from_movie_sentiment_template(
-    adjectives=adjectives,
-    verbs=verbs
+    adjectives=adjectives, verbs=verbs
 )
 
 # Convert to probing dataset with automatic position finding
@@ -82,7 +119,7 @@ movie_dataset = TemplatedDataset.from_movie_sentiment_template(
 probing_dataset = movie_dataset.to_probing_dataset(
     label_from_attributes="sentiment",
     label_map={"positive": 1, "negative": 0},
-    auto_add_positions=True
+    auto_add_positions=True,
 )
 
 # Convert to tokenized dataset
@@ -93,7 +130,7 @@ tokenized_dataset = TokenizedProbingDataset.from_probing_dataset(
     tokenizer=tokenizer,
     padding=True,  # Add padding
     max_length=128,  # Specify max length
-    add_special_tokens=True
+    add_special_tokens=True,
 )
 
 # %% [markdown]
@@ -116,14 +153,12 @@ supervised_trainer_config = SupervisedTrainerConfig(
     handle_class_imbalance=True,
     show_progress=True,
     device=device,
-    standardize_activations=True
+    standardize_activations=True,
 )
 
 # Common trainer configuration for directional probes
 directional_trainer_config = DirectionalTrainerConfig(
-    batch_size=32,
-    device=device,
-    standardize_activations=True
+    batch_size=32, device=device, standardize_activations=True
 )
 
 # Dictionary to store probes and their training histories
@@ -143,7 +178,7 @@ linear_probe_config = LinearProbeConfig(
     model_name=model_name,
     hook_point=hook_point,
     hook_layer=7,
-    name="sentiment_linear_probe"
+    name="sentiment_linear_probe",
 )
 
 linear_pipeline_config = ProbePipelineConfig(
@@ -155,7 +190,7 @@ linear_pipeline_config = ProbePipelineConfig(
     position_key="ADJ",
     model_name=model_name,
     hook_points=[hook_point],
-    cache_dir="./cache/linear_probe_cache"
+    cache_dir="./cache/linear_probe_cache",
 )
 
 print("Training Linear Probe...")
@@ -177,7 +212,7 @@ logistic_probe_config = LogisticProbeConfig(
     model_name=model_name,
     hook_point=hook_point,
     hook_layer=7,
-    name="sentiment_logistic_probe"
+    name="sentiment_logistic_probe",
 )
 
 logistic_pipeline_config = ProbePipelineConfig(
@@ -189,7 +224,7 @@ logistic_pipeline_config = ProbePipelineConfig(
     position_key="ADJ",
     model_name=model_name,
     hook_points=[hook_point],
-    cache_dir="./cache/logistic_probe_cache"
+    cache_dir="./cache/logistic_probe_cache",
 )
 
 print("Training Logistic Probe...")
@@ -211,7 +246,7 @@ kmeans_probe_config = KMeansProbeConfig(
     model_name=model_name,
     hook_point=hook_point,
     hook_layer=7,
-    name="sentiment_kmeans_probe"
+    name="sentiment_kmeans_probe",
 )
 
 kmeans_pipeline_config = ProbePipelineConfig(
@@ -223,7 +258,7 @@ kmeans_pipeline_config = ProbePipelineConfig(
     position_key="ADJ",
     model_name=model_name,
     hook_points=[hook_point],
-    cache_dir="./cache/kmeans_probe_cache"
+    cache_dir="./cache/kmeans_probe_cache",
 )
 
 print("Training KMeans Probe...")
@@ -245,7 +280,7 @@ pca_probe_config = PCAProbeConfig(
     model_name=model_name,
     hook_point=hook_point,
     hook_layer=7,
-    name="sentiment_pca_probe"
+    name="sentiment_pca_probe",
 )
 
 pca_pipeline_config = ProbePipelineConfig(
@@ -257,7 +292,7 @@ pca_pipeline_config = ProbePipelineConfig(
     position_key="ADJ",
     model_name=model_name,
     hook_points=[hook_point],
-    cache_dir="./cache/pca_probe_cache"
+    cache_dir="./cache/pca_probe_cache",
 )
 
 print("Training PCA Probe...")
@@ -278,7 +313,7 @@ meandiff_probe_config = MeanDiffProbeConfig(
     model_name=model_name,
     hook_point=hook_point,
     hook_layer=7,
-    name="sentiment_meandiff_probe"
+    name="sentiment_meandiff_probe",
 )
 
 meandiff_pipeline_config = ProbePipelineConfig(
@@ -290,7 +325,7 @@ meandiff_pipeline_config = ProbePipelineConfig(
     position_key="ADJ",
     model_name=model_name,
     hook_points=[hook_point],
-    cache_dir="./cache/meandiff_probe_cache"
+    cache_dir="./cache/meandiff_probe_cache",
 )
 
 print("Training Mean Difference Probe...")
@@ -318,12 +353,12 @@ plt.figure(figsize=(12, 6))
 # Plot training histories for supervised probes
 for probe_type in ["linear", "logistic"]:
     history = training_histories[probe_type]
-    plt.plot(history['train_loss'], label=f'{probe_type.title()} Train')
-    plt.plot(history['val_loss'], label=f'{probe_type.title()} Val', linestyle='--')
+    plt.plot(history["train_loss"], label=f"{probe_type.title()} Train")
+    plt.plot(history["val_loss"], label=f"{probe_type.title()} Val", linestyle="--")
 
-plt.xlabel('Epoch')
-plt.ylabel('Loss')
-plt.title('Training History for Supervised Probes')
+plt.xlabel("Epoch")
+plt.ylabel("Loss")
+plt.title("Training History for Supervised Probes")
 plt.legend()
 plt.show()
 
@@ -337,17 +372,14 @@ test_examples = [
     "The movie was incredible and I loved every minute of it.",
     "That film was absolutely terrible and I hated it.",
     "The acting was mediocre but I liked the soundtrack.",
-    "A beautiful story with outstanding performances."
+    "A beautiful story with outstanding performances.",
 ]
 
 # Create inference objects for each probe
 inference_objects = {}
 for probe_type, probe in probes.items():
     inference_objects[probe_type] = ProbeInference(
-        model_name=model_name,
-        hook_point=hook_point,
-        probe=probe,
-        device=device
+        model_name=model_name, hook_point=hook_point, probe=probe, device=device
     )
 
 # Get probabilities for each probe
@@ -385,9 +417,7 @@ for i, probe_type1 in enumerate(probe_types):
     for j, probe_type2 in enumerate(probe_types):
         # Compute cosine similarity between directions
         cos_sim = torch.nn.functional.cosine_similarity(
-            directions[probe_type1],
-            directions[probe_type2],
-            dim=0
+            directions[probe_type1], directions[probe_type2], dim=0
         )
         similarity_matrix[i, j] = cos_sim
 
@@ -429,5 +459,5 @@ print(tabulate(table_data, headers=headers, tablefmt="grid"))
 #
 # The cosine similarities between directions show how different methods may converge
 # to similar or different solutions, just as shown in the *Language Models Linearly Represent Sentiment* paper. High similarities suggest the methods are
-# finding consistent patterns in the activation space. 
+# finding consistent patterns in the activation space.
 # %%
