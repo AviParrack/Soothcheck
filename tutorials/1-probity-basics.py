@@ -14,6 +14,7 @@
 # %% Setup and imports
 import torch
 import os
+import json
 import numpy as np
 import random
 import matplotlib.pyplot as plt
@@ -30,6 +31,7 @@ from probity.pipeline.pipeline import ProbePipeline, ProbePipelineConfig
 # Third-party imports
 from transformers import AutoTokenizer
 from transformer_lens import HookedTransformer
+from neuronpedia.np_vector import NPVector
 
 # Set torch device consistently
 if torch.backends.mps.is_available():
@@ -172,7 +174,7 @@ trainer_config = SupervisedTrainerConfig(
     train_ratio=0.8,  # 80-20 train-val split
     handle_class_imbalance=True,
     show_progress=True,
-    standardize_activations=True, # Empirically, this produces better results
+    standardize_activations=True,  # Empirically, this produces better results
 )
 
 pipeline_config = ProbePipelineConfig(
@@ -227,18 +229,18 @@ plt.show()
 
 # %% [markdown]
 # # Now we'll test the standardized inference path
-# 
+#
 # ## Understanding how inference differs from training
-# 
+#
 # When running inference with a trained probe, it's important to understand:
-# 
+#
 # 1. **Position keys are only used during training** - While we specified `position_key="ADJ"` during training
 #    to learn the sentiment direction specifically from adjective positions, the trained probe doesn't "remember"
 #    this position information during inference.
-# 
+#
 # 2. **Inference applies to all tokens** - The probe is applied to every token in the input text, giving
 #    a score for each token position. This means even function words like "the" and "and" get scores.
-#    
+#
 # 3. **Format independence** - You can run inference on any text format, not just the template used for training.
 #    However, the probe will be most reliable when applied to similar linguistic patterns as seen during training.
 
@@ -255,9 +257,9 @@ inference = ProbeInference(
 # Create some test examples with different formats than our training template
 test_examples = [
     "The movie was incredible and I loved every minute of it.",  # Similar to training format
-    "That film was absolutely terrible and I hated it.",         # Similar format with synonyms
-    "The acting was mediocre but I liked the soundtrack.",       # Mixed sentiment 
-    "A beautiful story with outstanding performances.",          # Different format
+    "That film was absolutely terrible and I hated it.",  # Similar format with synonyms
+    "The acting was mediocre but I liked the soundtrack.",  # Mixed sentiment
+    "A beautiful story with outstanding performances.",  # Different format
 ]
 
 # Get raw activation scores along the probe direction
@@ -271,44 +273,46 @@ print(f"Probabilities shape: {probabilities.shape}")
 # Display the results with token-level breakdown
 for i, example in enumerate(test_examples):
     print(f"\nText: {example}")
-    
+
     # Show token-level analysis
     tokens = inference.model.to_str_tokens(example, prepend_bos=False)
     token_probs = probabilities[i]
-    
+
     # Make sure we only process as many tokens as we have probabilities for
     max_tokens = min(len(tokens), len(token_probs) - 1)
-    
+
     print("\nToken-level sentiment analysis:")
     print(f"{'Token':<15} {'Sentiment Score':<15} {'Interpretation'}")
     print("-" * 50)
-    
+
     for j in range(max_tokens):
         token = tokens[j]
 
         score = token_probs[j].item()
-        interp = "Positive" if score > 0.6 else "Negative" if score < 0.4 else "Neutral"
+        interp = "Positive" if score > 0.6 else "Negative" if score < 0.1 else "Neutral"
         print(f"{token:<15} {score:.4f}           {interp}")
-    
+
     # Get mean probability across tokens (excluding BOS) as sentiment score
-    overall_sentiment = token_probs[1:max_tokens+1].mean().item()
-    print(f"\nOverall document sentiment: {overall_sentiment:.4f} ({'Positive' if overall_sentiment > 0.6 else 'Negative' if overall_sentiment < 0.4 else 'Neutral'})")
+    overall_sentiment = token_probs[1 : max_tokens + 1].mean().item()
+    print(
+        f"\nOverall document sentiment: {overall_sentiment:.4f} ({'Positive' if overall_sentiment > 0.6 else 'Negative' if overall_sentiment < 0.4 else 'Neutral'})"
+    )
 
 # %% [markdown]
 # ## Observations on the token-level scores
-# 
+#
 # Looking at the token-level breakdown:
-# 
-# 1. **Content words matter most**: Words like "incredible", "terrible", "loved", and "hated" show 
+#
+# 1. **Content words matter most**: Words like "incredible", "terrible", "loved", and "hated" show
 #    the strongest sentiment signals, while function words like "the" and "and" are more neutral.
-# 
-# 2. **Contextual influence**: Even seemingly neutral words can be affected by surrounding context. 
+#
+# 2. **Contextual influence**: Even seemingly neutral words can be affected by surrounding context.
 #    The same word might get different scores in different sentences.
-# 
+#
 # 3. **Format robustness**: The probe works well on sentences with different structures than our training
 #    template, showing it captures generalizable sentiment features.
 #
-# 4. **Aggregation strategy**: Taking the mean across all tokens is simple but not always optimal. 
+# 4. **Aggregation strategy**: Taking the mean across all tokens is simple but not always optimal.
 #    In practice, you might want to weight content words more heavily or focus on specific parts of speech.
 
 # %% [markdown]
@@ -347,18 +351,20 @@ loaded_probabilities = loaded_inference.get_probabilities(test_examples)
 # Compare results between original and loaded probes
 for i, example in enumerate(test_examples):
     print(f"\nText: {example}")
-    
+
     # Show token-level analysis
     tokens = loaded_inference.model.to_str_tokens(example, prepend_bos=False)
     token_probs = loaded_probabilities[i]
-    
+
     # Make sure we only process as many tokens as we have probabilities for
     # Skip the BOS token in the probabilities
     max_tokens = min(len(tokens), len(token_probs) - 1)
-    
+
     # Get document-level sentiment score (excluding BOS)
-    overall_sentiment = token_probs[1:max_tokens+1].mean().item()
-    print(f"Overall document sentiment (loaded probe): {overall_sentiment:.4f} ({'Positive' if overall_sentiment > 0.6 else 'Negative' if overall_sentiment < 0.4 else 'Neutral'})")
+    overall_sentiment = token_probs[1 : max_tokens + 1].mean().item()
+    print(
+        f"Overall document sentiment (loaded probe): {overall_sentiment:.4f} ({'Positive' if overall_sentiment > 0.6 else 'Negative' if overall_sentiment < 0.4 else 'Neutral'})"
+    )
 
 # %% [markdown]
 # # Verify consistency between original and loaded probes
@@ -393,7 +399,7 @@ token_diffs = torch.abs(raw_scores - loaded_raw_scores).mean(dim=0)
 print("\nToken-level mean absolute differences:")
 for i, diff in enumerate(token_diffs):
     print(f"Token {i}: {diff.item():.6f}")
-    
+
 max_diff_token = torch.argmax(token_diffs).item()
 print(f"\nLargest difference at token position {max_diff_token}")
 
@@ -409,7 +415,7 @@ print(
 
 if non_bos_prob_diff < 0.3:
     print("The non-BOS tokens show reasonable consistency.")
-    
+
 # Verify the trend is similar (correlation between original and loaded results)
 flattened_orig = probabilities[:, 1:].flatten()
 flattened_loaded = loaded_probabilities[:, 1:].flatten()
@@ -429,29 +435,34 @@ elif correlation > 0.5:
 # While probes are applied to all tokens during inference, you often want to focus on specific tokens
 # for different text formats. Here's a pattern for selecting tokens of interest:
 
+
 # %%
 def analyze_with_focus(text, inference, focus_words=None, pos_tags=None):
     """Analyze text with focus on specific words or POS tags."""
     print(f"\nAnalyzing: {text}")
-    
+
     # Get probabilities for all tokens
     probs = inference.get_probabilities([text])[0]
     tokens = inference.model.to_str_tokens(text, prepend_bos=False)
-    
+
     # Handle token count mismatch - skip BOS token in probabilities
     max_tokens = min(len(tokens), len(probs) - 1)
-    
+
     # Print all token scores
     print("\nAll token scores:")
     for i in range(max_tokens):
         token = tokens[i]
         score = probs[i].item()
         print(f"{token:<12} {score:.4f}")
-    
+
     # Focus on specific words if requested
     if focus_words:
         print("\nFocusing on specific words:")
-        focus_indices = [i for i in range(max_tokens) if any(word in tokens[i].lower() for word in focus_words)]
+        focus_indices = [
+            i
+            for i in range(max_tokens)
+            if any(word in tokens[i].lower() for word in focus_words)
+        ]
         if focus_indices:
             focus_tokens = [tokens[i] for i in focus_indices]
             adjusted_indices = [i for i in focus_indices]
@@ -460,75 +471,64 @@ def analyze_with_focus(text, inference, focus_words=None, pos_tags=None):
             print(f"Average sentiment: {focus_scores:.4f}")
         else:
             print("No matching words found")
-    
+
     # Calculate overall sentiment
     avg_score = probs[1:max_tokens].mean().item()
-    sentiment = "Positive" if avg_score > 0.55 else "Negative" if avg_score < 0.4 else "Neutral"
+    sentiment = (
+        "Positive" if avg_score > 0.55 else "Negative" if avg_score < 0.4 else "Neutral"
+    )
     print(f"\nOverall sentiment: {avg_score:.4f} ({sentiment})")
-    
+
     return avg_score
+
 
 # Try with some very different text formats
 complex_review = "Despite excellent visuals and strong performances from the lead actors, the plot was incoherent and the pacing dragged in the middle."
 
 # Analyze with focus on content words related to different aspects
 print("\n===== Customized token selection =====")
-analyze_with_focus(complex_review, inference, focus_words=["visual", "perform", "actor"])
+analyze_with_focus(
+    complex_review, inference, focus_words=["visual", "perform", "actor"]
+)
 analyze_with_focus(complex_review, inference, focus_words=["plot", "pac", "middle"])
 
-# %% [markdown]
-# # Standardized pattern for future reference
 
+# %% [markdown]
+# # Uploading to Neuronpedia
+#
+# Once you've trained a probe, you can upload it to Neuronpedia. The process is straightforward:
+# 1. Get the probe direction
+# 2. Set your API key
+# 3. Upload the probe
+# 4. Profit
 
 # %%
-# Reference: Standardized pattern for inference
-def standardized_inference_pattern(model_name, hook_point, probe_or_path, texts):
-    """
-    Template for the standardized probe inference pattern.
+# Get the probe direction
+probe_direction = probe.get_direction()
 
-    Args:
-        model_name: Model name for TransformerLens
-        hook_point: Layer hook point
-        probe_or_path: Either a probe object or path to saved probe
-        texts: List of text examples to analyze
+# Convert to list of floats
+probe_direction = probe_direction.tolist()
 
-    Returns:
-        Probabilities for each example
-        
-    Note:
-        The returned probabilities include the BOS token at index 0.
-        When displaying results, typically skip this token by using
-        probabilities[:, 1:] or probabilities[i, 1:] for a single example.
-    """
-    # Create inference object
-    if isinstance(probe_or_path, str):
-        # From saved probe
-        inference = ProbeInference.from_saved_probe(
-            model_name=model_name,
-            hook_point=hook_point,
-            probe_path=probe_or_path,
-            device=device,
-        )
-    else:
-        # From probe object
-        inference = ProbeInference(
-            model_name=model_name,
-            hook_point=hook_point,
-            probe=probe_or_path,
-            device=device,
-        )
+from neuronpedia.np_vector import NPVector
 
-    # Get probabilities (applies sigmoid for logistic probes)
-    probabilities = inference.get_probabilities(texts)
+# from neuronpedia.org/account
+os.environ["NEURONPEDIA_API_KEY"] = "43d961a6-c4d2-4ccf-8565-9c915813e65c"
 
-    # If you need raw activations instead:
-    # raw_activations = inference.get_direction_activations(texts)
+# upload the custom vector
+np_vector = NPVector.new(
+    label="sentiment_probe",
+    model_id="gpt2-small",
+    layer_num=7,
+    hook_type="hook_resid_pre",
+    vector=probe_direction,
+    default_steer_strength=20,
+)
 
-    return probabilities
+# steer with it
+responseJson = np_vector.steer_completion(prompt="The movie was")
 
-
-# Example usage
-# probs = standardized_inference_pattern(model_name, hook_point, probe, test_examples)
+print(json.dumps(responseJson, indent=2))
+print("UI Steering at: " + responseJson["shareUrl"])
 
 # %% [markdown]
 # # Conclusion
@@ -538,6 +538,3 @@ def standardized_inference_pattern(model_name, hook_point, probe_or_path, texts)
 #    - Save it with probe.save() or probe.save_json()
 #    - Load it with ProbeInference.from_saved_probe()
 #    - Use get_direction_activations() for raw scores or get_probabilities() for transformed outputs
-
-# %%
-

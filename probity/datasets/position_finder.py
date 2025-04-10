@@ -32,16 +32,17 @@ class PositionFinder:
         Returns:
             Function that finds the position in a string matching the template
         """
+
         def finder(text: str) -> Position:
             # First escape the entire template
             regex = re.escape(template)
-            
+
             # Then replace the escaped marker with a capture group
             escaped_marker = re.escape(marker)
             regex = regex.replace(escaped_marker, "(.*?)")
-            
+
             # Replace other template variables with non-capturing wildcards
-            for var in re.findall(r'\\\{([^}]+)\\\}', regex):
+            for var in re.findall(r"\\\{([^}]+)\\\}", regex):
                 var_marker = f"\\{{{var}\\}}"
                 regex = regex.replace(var_marker, ".*?")
             # print(f"Template: {template}")
@@ -111,56 +112,76 @@ class PositionFinder:
     ) -> int:
         """
         Convert character position to token position, handling special tokens properly.
-        
+
         Args:
             position: Character position to convert
             text: Input text
             tokenizer: Tokenizer to use
             space_precedes_token: Whether space precedes token (default: True)
             add_special_tokens: Whether to add special tokens (default: True)
-            padding_side: Override tokenizer's padding side (default: None, uses tokenizer.padding_side)
-            
+            padding_side: Override tokenizer padding side (default: None)
+
         Returns:
             Token index corresponding to the character position
         """
-        # Get the tokenizer's padding side (for later use in calling methods)
-        tokenizer_padding_side = padding_side if padding_side is not None else getattr(tokenizer, "padding_side", "right")
-        
+        # Unused: Get tokenizer padding side.
+        # pad_side = padding_side if padding_side is not None \
+        #            else getattr(tokenizer, "padding_side", "right")
+
         # First get clean offsets without special tokens
-        clean_encoding = tokenizer(text, return_offsets_mapping=True, add_special_tokens=False)
-        clean_offsets = clean_encoding.offset_mapping
-        clean_tokens = clean_encoding.input_ids
-        
+        clean_encoding = tokenizer(
+            text, return_offsets_mapping=True, add_special_tokens=False
+        )
+        clean_offsets = clean_encoding["offset_mapping"]
+        # clean_tokens = clean_encoding["input_ids"]
+
         # Find the token index in the clean encoding
         clean_token_idx = None
+        assert isinstance(clean_offsets, list)  # Assure type checker it's iterable
         for idx, (start, end) in enumerate(clean_offsets):
             if start <= position.start < end:
                 clean_token_idx = idx
                 break
-        
+
         if clean_token_idx is None:
-            raise ValueError(f"Character position {position.start} not aligned with any token offset.")
-        
+            msg = (
+                f"Character position {position.start} not aligned "
+                f"with any token offset."
+            )
+            raise ValueError(msg)
+
         # If we don't need to account for special tokens, just return the clean index
         if not add_special_tokens:
             return clean_token_idx
-        
-        # Get tokens with special tokens
-        tokens_with_special = tokenizer(text, add_special_tokens=True).input_ids
-        
-        # Otherwise, adjust for special tokens
-        # Count special tokens at the beginning
+
+        # Get tokens with special tokens to check for actual prefix tokens
+        tokens_with_special = tokenizer(text, add_special_tokens=True)["input_ids"]
+
+        # Count special tokens at the beginning IF they actually appear
         prefix_tokens = 0
-        if hasattr(tokenizer, "bos_token_id") and tokenizer.bos_token_id is not None:
+        if (
+            hasattr(tokenizer, "bos_token_id")
+            and tokenizer.bos_token_id is not None
+            and tokens_with_special  # Ensure list is not empty
+            and tokens_with_special[0] == tokenizer.bos_token_id
+        ):
             prefix_tokens += 1
-        
-        # Calculate the token position with special tokens but before padding
+        # Add checks for other potential prefix tokens if necessary (e.g., cls_token)
+        # elif (
+        #     hasattr(tokenizer, "cls_token_id")
+        #     and tokenizer.cls_token_id is not None
+        #     and tokens_with_special
+        #     and tokens_with_special[0] == tokenizer.cls_token_id
+        # ):
+        #    prefix_tokens += 1
+
+        # Calculate the token position relative to the sequence *with* special tokens
         position_with_special = clean_token_idx + prefix_tokens
-        
+
         # Note: At this point, the position only accounts for special tokens like BOS,
         # but not for padding. Padding is dynamic and handled at batch preparation time
         # in get_batch_tensors.
-        
+
         return position_with_special
 
     @staticmethod

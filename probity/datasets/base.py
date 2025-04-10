@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Union, Set, Callable, Any
+from typing import Dict, List, Optional, Union, Set, Callable, cast, Any
 from datasets import Dataset
 import json
 from .position_finder import Position
@@ -28,7 +28,9 @@ class ProbingExample:
     label_text: str  # Original text label
     character_positions: Optional[CharacterPositions] = None
     group_id: Optional[str] = None  # For cross-validation/grouping
-    attributes: Optional[Dict] = None  # Additional attributes about this example (previously called metadata)
+    attributes: Optional[Dict] = (
+        None  # Additional attributes about this example (previously called metadata)
+    )
 
 
 class ProbingDataset:
@@ -40,21 +42,26 @@ class ProbingDataset:
         task_type: str = "classification",  # or "regression"
         valid_layers: Optional[List[str]] = None,
         label_mapping: Optional[Dict[str, int]] = None,
-        dataset_attributes: Optional[Dict] = None,  # Dataset-level attributes (previously metadata)
+        dataset_attributes: Optional[
+            Dict
+        ] = None,  # Dataset-level attributes (previously metadata)
     ):
-        self.examples = examples
         self.task_type = task_type
-        self.valid_layers = valid_layers or []
-        self.label_mapping = label_mapping or {}
-        self.dataset_attributes = dataset_attributes or {}  # Renamed from metadata
+        self.valid_layers = valid_layers
+        self.label_mapping = label_mapping
+        self.dataset_attributes = dataset_attributes or {}
+        self.examples = examples
+        self.dataset = self._to_hf_dataset()
 
-        # Add position_types attribute - derived from examples
+        # Infer position types from examples if available
         self.position_types = set()
-        for example in examples:
+        for example in self.examples:
             if example.character_positions:
                 self.position_types.update(example.character_positions.keys())
-                
-        self.dataset = self._to_hf_dataset()
+
+    def __len__(self) -> int:
+        """Return the number of examples in the dataset."""
+        return len(self.examples)
 
     def add_target_positions(
         self, key: str, finder: Callable[[str], Union[Position, List[Position]]]
@@ -85,6 +92,7 @@ class ProbingDataset:
             "label": [],
             "label_text": [],
             "group_id": [],
+            "attributes_json": [],  # Add column for attributes JSON string
         }
 
         # Add position data if available
@@ -104,6 +112,9 @@ class ProbingDataset:
             data_dict["label"].append(ex.label)
             data_dict["label_text"].append(ex.label_text)
             data_dict["group_id"].append(ex.group_id)
+            # Save attributes as JSON string
+            attributes_str = json.dumps(ex.attributes) if ex.attributes else None
+            data_dict["attributes_json"].append(attributes_str)
 
             # Add position data
             if ex.character_positions:
@@ -148,9 +159,10 @@ class ProbingDataset:
         """Create ProbingDataset from a HuggingFace dataset."""
         examples = []
 
-        for item in dataset:  # type: ignore
-            # Update position handling to use character positions
-            positions = {}
+        for item_raw in dataset:
+            item = cast(Dict[str, Any], item_raw)  # Cast to Dict with Any values
+            # Explicitly type the positions dictionary
+            positions: Dict[str, Union[Position, List[Position]]] = {}
             for pt in position_types:
                 # Check for single position
                 start = item.get(f"char_pos_{pt}_start")
@@ -163,14 +175,36 @@ class ProbingDataset:
                 elif start is not None and end is not None:
                     # Handle single position
                     positions[pt] = Position(start=start, end=end)
+                # Only add key if multi or start/end were found
+                elif multi or (start is not None and end is not None):
+                    pass  # Already handled above
+                else:
+                    # If no position data found for this key, don't add it
+                    pass
+
+            # Only create CharacterPositions if positions dict is not empty
+            char_positions_obj = CharacterPositions(positions) if positions else None
+
+            # Load attributes from JSON string
+            attributes = None
+            attributes_str = item.get("attributes_json")
+            if isinstance(attributes_str, str):
+                try:
+                    attributes = json.loads(attributes_str)
+                except json.JSONDecodeError:
+                    print(
+                        f"Warning: Failed to decode attributes JSON: {attributes_str}"
+                    )
+                    attributes = None  # Or handle error as appropriate
 
             examples.append(
                 ProbingExample(
                     text=str(item["text"]),
                     label=float(item["label"]),
                     label_text=str(item["label_text"]),
-                    character_positions=CharacterPositions(positions),
+                    character_positions=char_positions_obj,  # Use potentially None object
                     group_id=item.get("group_id"),
+                    attributes=attributes,  # Add loaded attributes
                 )
             )
 
@@ -197,10 +231,12 @@ class ProbingDataset:
             "valid_layers": self.valid_layers,
             "label_mapping": self.label_mapping,
             "dataset_attributes": self.dataset_attributes,  # Renamed from metadata
-            "position_types": list(position_types)  # Add position_types to attributes
+            "position_types": list(position_types),  # Add position_types to attributes
         }
 
-        with open(f"{path}/dataset_attributes.json", "w") as f:  # Renamed from metadata.json
+        with open(
+            f"{path}/dataset_attributes.json", "w"
+        ) as f:  # Renamed from metadata.json
             json.dump(attributes, f)
 
     @classmethod
@@ -210,14 +246,20 @@ class ProbingDataset:
         dataset = Dataset.load_from_disk(f"{path}/hf_dataset")
 
         # Try the new attributes filename first, fall back to old metadata.json for backward compatibility
-        attributes_file = f"{path}/dataset_attributes.json" if os.path.exists(f"{path}/dataset_attributes.json") else f"{path}/metadata.json"
-        
+        attributes_file = (
+            f"{path}/dataset_attributes.json"
+            if os.path.exists(f"{path}/dataset_attributes.json")
+            else f"{path}/metadata.json"
+        )
+
         # Load attributes
         with open(attributes_file, "r") as f:
             attributes = json.load(f)
 
         # Handle backward compatibility - if loading old file format
-        dataset_attributes_key = "dataset_attributes" if "dataset_attributes" in attributes else "metadata"
+        dataset_attributes_key = (
+            "dataset_attributes" if "dataset_attributes" in attributes else "metadata"
+        )
 
         return cls.from_hf_dataset(
             dataset=dataset,
@@ -236,31 +278,26 @@ class ProbingDataset:
             test_size=test_size, shuffle=shuffle, seed=seed
         )
 
-        # Remove position_types from both train and test creation
+        # Get position types from the original dataset
+        original_position_types = list(self.position_types)
+
+        # Pass original position types when creating new datasets
         train = self.from_hf_dataset(
             dataset=split["train"],
-            position_types=[
-                k.replace("char_pos_", "")
-                for k in split["train"].features.keys()
-                if k.endswith("_start")
-            ],  # Derive position types from columns
+            position_types=original_position_types,
             label_mapping=self.label_mapping,
             task_type=self.task_type,
             valid_layers=self.valid_layers,
-            dataset_attributes=self.dataset_attributes,  # Renamed from metadata
+            dataset_attributes=self.dataset_attributes,  # Renamed metadata
         )
 
         test = self.from_hf_dataset(
             dataset=split["test"],
-            position_types=[
-                k.replace("char_pos_", "")
-                for k in split["test"].features.keys()
-                if k.endswith("_start")
-            ],  # Derive position types from columns
+            position_types=original_position_types,
             label_mapping=self.label_mapping,
             task_type=self.task_type,
             valid_layers=self.valid_layers,
-            dataset_attributes=self.dataset_attributes,  # Renamed from metadata
+            dataset_attributes=self.dataset_attributes,  # Renamed metadata
         )
 
         return train, test
