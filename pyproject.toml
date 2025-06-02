@@ -19,11 +19,12 @@ requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "probity"
+name = "soothcheck"
 version = "0.1.0"
-description = "A library for probing neural networks"
+description = "Utilities and tutorials for the Probity probing library"
 requires-python = ">=3.7"
 dependencies = [
+    "probity>=0.1.0",
     "torch>=2.0.0",
     "transformers>=4.30.0",
     "numpy>=1.24.0",
@@ -37,4 +38,4 @@ dependencies = [
 ]
 
 [tool.setuptools]
-packages = ["probity"]
+packages = []
