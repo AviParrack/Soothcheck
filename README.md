@@ -20,12 +20,7 @@ Probity is a toolkit for interpretability research on neural networks, with a fo
 ## Installation
 
 ```bash
-# Clone the repository
-git clone https://github.com/curt-tigges/probity.git
-cd probity
-
-# Install the library
-pip install -e .
+pip install probity
 ```
 
 ## Quick Start
@@ -165,12 +160,11 @@ See the `tutorials/` directory for comprehensive examples of using Probity:
 
 ## Project Structure
 
-- **probity/collection/**: Activation collection and storage
-- **probity/datasets/**: Dataset creation and management
-- **probity/probes/**: Probe implementation and utilities
-- **probity/training/**: Training frameworks for probes
-- **probity/utils/**: Utility functions and helpers
-- **tutorials/**: Example notebooks and tutorials
+This repository contains tutorials and tests that rely on the external
+`probity` library.
+
+- **apollo/**: Dataset helpers for RepE experiments
+- **tutorials/**: Example notebooks demonstrating Probity
 - **tests/**: Unit and integration tests
 
 ## Citation
