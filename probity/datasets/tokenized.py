@@ -227,7 +227,7 @@ class TokenizedProbingDataset(ProbingDataset):
         tokenization_config = TokenizationConfig(
             tokenizer_name=tokenizer.name_or_path,
             tokenizer_kwargs=tokenizer_kwargs,
-            vocab_size=tokenizer.vocab_size,
+            vocab_size=len(tokenizer),
             pad_token_id=tokenizer.pad_token_id,
             eos_token_id=tokenizer.eos_token_id,
             bos_token_id=tokenizer.bos_token_id,
