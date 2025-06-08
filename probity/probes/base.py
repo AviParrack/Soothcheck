@@ -7,8 +7,8 @@ from typing import Optional, Generic, TypeVar, TYPE_CHECKING, get_args, get_orig
 import importlib
 
 # Use TYPE_CHECKING to avoid circular imports at runtime
-if TYPE_CHECKING:
-    from .config import (
+# if TYPE_CHECKING:
+from .config import (
         ProbeConfig,
         LinearProbeConfig,
         LogisticProbeConfig,
@@ -19,6 +19,9 @@ if TYPE_CHECKING:
         SklearnLogisticProbeConfig,  # Assuming this might be needed
         LogisticProbeConfigBase,  # Add the base config too
     )
+
+# from .config import ProbeConfig, MeanDiffProbeConfig
+
 
 # Generic type variable bound by ProbeConfig
 T = TypeVar("T", bound="ProbeConfig")
@@ -40,19 +43,41 @@ class BaseProbe(ABC, nn.Module, Generic[T]):
 
     config: T  # Type hint for config instance
 
+    # def __init__(self, config: T):
+    #     super().__init__()
+    #     self.config = config
+    #     self.dtype = (
+    #         torch.float32
+    #         if _get_config_attr(config, "dtype", "float32") == "float32"
+    #         else torch.float16
+    #     )
+    #     self.name = (
+    #         _get_config_attr(config, "name", "unnamed_probe") or "unnamed_probe"
+    #     )  # Ensure name is not None
+    #     # Standardization is handled by the trainer, not stored in the probe.
+
+
     def __init__(self, config: T):
         super().__init__()
         self.config = config
-        self.dtype = (
-            torch.float32
-            if _get_config_attr(config, "dtype", "float32") == "float32"
-            else torch.float16
-        )
+        # Support bfloat16 in addition to float32 and float16
+        dtype_str = _get_config_attr(config, "dtype", "float32")
+        print(f"[DEBUG BaseProbe.__init__] Config dtype string: {dtype_str}")
+        
+        if dtype_str == "bfloat16":
+            self.dtype = torch.bfloat16
+        elif dtype_str == "float16":
+            self.dtype = torch.float16
+        else:
+            self.dtype = torch.float32
+        
+        print(f"[DEBUG BaseProbe.__init__] Set self.dtype to: {self.dtype}")
+        print(f"[DEBUG BaseProbe.__init__] Probe class: {self.__class__.__name__}")
+        
         self.name = (
             _get_config_attr(config, "name", "unnamed_probe") or "unnamed_probe"
-        )  # Ensure name is not None
-        # Standardization is handled by the trainer, not stored in the probe.
-
+        )
+    
     @abstractmethod
     def get_direction(self, normalized: bool = True) -> torch.Tensor:
         """Get the learned probe direction in the original activation space.
@@ -211,26 +236,58 @@ class BaseProbe(ABC, nn.Module, Generic[T]):
 
             return probe
 
+    # def save_json(self, path: str) -> None:
+    #     """Save probe's internal direction and metadata as JSON."""
+    #     if not path.endswith(".json"):
+    #         path += ".json"
+
+    #     save_dir = os.path.dirname(path)
+    #     if save_dir:
+    #         os.makedirs(save_dir, exist_ok=True)
+
+    #     # Get the internal representation (always in original activation space)
+    #     try:
+    #         vector = self._get_raw_direction_representation()
+    #         if vector is None:
+    #             raise ValueError("Raw direction representation is None.")
+    #         vector_np = vector.detach().clone().cpu().numpy()
+    #     except Exception as e:
+    #         print(
+    #             f"Error getting raw direction for {self.name}: {e}. Cannot save JSON."
+    #         )
+    #         return
+
     def save_json(self, path: str) -> None:
         """Save probe's internal direction and metadata as JSON."""
         if not path.endswith(".json"):
             path += ".json"
-
+    
         save_dir = os.path.dirname(path)
         if save_dir:
             os.makedirs(save_dir, exist_ok=True)
-
+    
         # Get the internal representation (always in original activation space)
         try:
             vector = self._get_raw_direction_representation()
+            print(f"[DEBUG save_json] Raw vector dtype: {vector.dtype if vector is not None else 'None'}")
+            print(f"[DEBUG save_json] Raw vector shape: {vector.shape if vector is not None else 'None'}")
+            
             if vector is None:
                 raise ValueError("Raw direction representation is None.")
+            
+            # Convert to float32 before numpy conversion if bfloat16
+            if vector.dtype == torch.bfloat16:
+                print(f"[DEBUG save_json] Converting from bfloat16 to float32 for JSON serialization")
+                vector = vector.to(torch.float32)
+            
             vector_np = vector.detach().clone().cpu().numpy()
+            print(f"[DEBUG save_json] Numpy array dtype: {vector_np.dtype}")
         except Exception as e:
-            print(
-                f"Error getting raw direction for {self.name}: {e}. Cannot save JSON."
-            )
+            print(f"[DEBUG save_json] Exception type: {type(e)}")
+            print(f"[DEBUG save_json] Exception: {e}")
+            print(f"Error getting raw direction for {self.name}: {e}. Cannot save JSON.")
             return
+        
 
         # Prepare metadata using helper
         metadata = self._prepare_metadata(vector_np)
@@ -266,6 +323,7 @@ class BaseProbe(ABC, nn.Module, Generic[T]):
                     f"Fallback JSON serialization also failed for {self.name}: {final_e}"
                 )
 
+
     def _prepare_metadata(self, vector_np: Any) -> dict:
         """Helper to prepare metadata dictionary for saving."""
         metadata = {
@@ -284,7 +342,7 @@ class BaseProbe(ABC, nn.Module, Generic[T]):
             "dtype": _get_config_attr(self.config, "dtype", "float32"),
             "device": _get_config_attr(self.config, "device"),
         }
-
+    
         # Add bias info if relevant
         bias_value = None
         has_bias_param = False
@@ -294,6 +352,9 @@ class BaseProbe(ABC, nn.Module, Generic[T]):
             if hasattr(self.linear, "bias") and self.linear.bias is not None:
                 bias_param = self.linear.bias
                 if isinstance(bias_param, torch.Tensor):
+                    # FIXED: Convert bfloat16 to float32 before numpy conversion
+                    if bias_param.dtype == torch.bfloat16:
+                        bias_param = bias_param.to(torch.float32)
                     bias_value = bias_param.data.detach().clone().cpu().numpy().tolist()
                     has_bias_param = True
         elif (
@@ -301,14 +362,64 @@ class BaseProbe(ABC, nn.Module, Generic[T]):
         ):  # Check sklearn intercept
             intercept_param = self.intercept_
             if isinstance(intercept_param, torch.Tensor):
+                # FIXED: Convert bfloat16 to float32 before numpy conversion
+                if intercept_param.dtype == torch.bfloat16:
+                    intercept_param = intercept_param.to(torch.float32)
                 bias_value = (
                     intercept_param.data.detach().clone().cpu().numpy().tolist()
                 )
                 has_bias_param = True
-
+    
         metadata["has_bias"] = has_bias_param
         if has_bias_param:
             metadata["bias"] = bias_value
+    
+        # ... rest of the method remains the same ...
+
+    
+    # def _prepare_metadata(self, vector_np: Any) -> dict:
+    #     """Helper to prepare metadata dictionary for saving."""
+    #     metadata = {
+    #         "model_name": _get_config_attr(self.config, "model_name", "unknown_model"),
+    #         "hook_point": _get_config_attr(self.config, "hook_point", "unknown_hook"),
+    #         "hook_layer": _get_config_attr(self.config, "hook_layer", 0),
+    #         "hook_head_index": _get_config_attr(self.config, "hook_head_index"),
+    #         "name": self.name,
+    #         "vector_dimension": (
+    #             vector_np.shape[-1] if hasattr(vector_np, "shape") else None
+    #         ),
+    #         "probe_type": self.__class__.__name__,
+    #         "dataset_path": _get_config_attr(self.config, "dataset_path"),
+    #         "prepend_bos": _get_config_attr(self.config, "prepend_bos", True),
+    #         "context_size": _get_config_attr(self.config, "context_size", 128),
+    #         "dtype": _get_config_attr(self.config, "dtype", "float32"),
+    #         "device": _get_config_attr(self.config, "device"),
+    #     }
+
+    #     # Add bias info if relevant
+    #     bias_value = None
+    #     has_bias_param = False
+    #     if hasattr(self, "linear") and isinstance(
+    #         self.linear, nn.Module
+    #     ):  # Check linear layer first
+    #         if hasattr(self.linear, "bias") and self.linear.bias is not None:
+    #             bias_param = self.linear.bias
+    #             if isinstance(bias_param, torch.Tensor):
+    #                 bias_value = bias_param.data.detach().clone().cpu().numpy().tolist()
+    #                 has_bias_param = True
+    #     elif (
+    #         hasattr(self, "intercept_") and self.intercept_ is not None
+    #     ):  # Check sklearn intercept
+    #         intercept_param = self.intercept_
+    #         if isinstance(intercept_param, torch.Tensor):
+    #             bias_value = (
+    #                 intercept_param.data.detach().clone().cpu().numpy().tolist()
+    #             )
+    #             has_bias_param = True
+
+    #     metadata["has_bias"] = has_bias_param
+    #     if has_bias_param:
+    #         metadata["bias"] = bias_value
 
         # Save relevant config flags needed for reconstruction
         config_flags_to_save = [

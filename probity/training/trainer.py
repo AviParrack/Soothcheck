@@ -1,12 +1,10 @@
 from abc import ABC
 from dataclasses import dataclass
-
-# from pathlib import Path # Unused
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset
 from torch import optim
-from typing import Optional, Dict, List, Tuple, Literal  # Removed Any, Type
+from typing import Optional, Dict, List, Tuple, Literal
 from tqdm.auto import tqdm
 import math
 
@@ -16,9 +14,9 @@ from probity.collection.activation_store import ActivationStore
 from probity.probes import (
     BaseProbe,
     DirectionalProbe,
-    MultiClassLogisticProbe,  # Add import
-    LogisticProbe,  # Added back for instanceof check
-    LinearProbe,  # Added for instanceof check
+    MultiClassLogisticProbe,
+    LogisticProbe,
+    LinearProbe,
 )
 
 
@@ -47,6 +45,8 @@ class BaseProbeTrainer(ABC):
         # Store standardization stats if standardization is enabled
         self.feature_mean: Optional[torch.Tensor] = None
         self.feature_std: Optional[torch.Tensor] = None
+        print(f"[DEBUG BaseProbeTrainer.__init__] Trainer initialized with device: {config.device}")
+        print(f"[DEBUG BaseProbeTrainer.__init__] standardize_activations: {config.standardize_activations}")
 
     def _get_lr_scheduler(
         self, optimizer: optim.Optimizer, start_lr: float, end_lr: float, num_steps: int
@@ -92,12 +92,15 @@ class BaseProbeTrainer(ABC):
         num_neg = len(y) - num_pos
         weights = num_neg / (num_pos + 1e-8)  # Add epsilon to prevent division by zero
 
+        print(f"[DEBUG _calculate_pos_weights] input dtype: {y.dtype}, output dtype: {weights.dtype}")
         return weights
 
     def _calculate_class_weights(
         self, y: torch.Tensor, num_classes: int
     ) -> Optional[torch.Tensor]:
         """Calculate class weights for multi-class CrossEntropyLoss."""
+        print(f"[DEBUG _calculate_class_weights] input dtype: {y.dtype}, num_classes: {num_classes}")
+        
         if y.dim() == 2 and y.shape[1] == 1:
             y = y.squeeze(1)  # Convert [N, 1] to [N]
         if y.dim() != 1:
@@ -123,21 +126,24 @@ class BaseProbeTrainer(ABC):
         # Calculate weights: (total_samples / (num_classes * count_for_class))
         # This gives higher weight to less frequent classes.
         weights = total_samples / (num_classes * (counts + 1e-8))
-
-        # Handle cases where a class might have 0 samples (weight will be large but finite due to epsilon)
-        # Clamp weights to avoid extreme values? Optional.
-        # weights = torch.clamp(weights, min=0.1, max=10.0)
-
+        
+        print(f"[DEBUG _calculate_class_weights] output weights dtype: {weights.dtype}")
         return weights
 
     def _create_optimizer(self, model: torch.nn.Module) -> optim.Optimizer:
         """Create optimizer based on config."""
+        print(f"[DEBUG _create_optimizer] Creating {self.config.optimizer_type} optimizer")
+        
         optimizer_class = getattr(optim, self.config.optimizer_type, None)
         if optimizer_class is None:
             raise ValueError(f"Unknown optimizer type: {self.config.optimizer_type}")
 
         # Filter out parameters that do not require gradients
         params_to_optimize = filter(lambda p: p.requires_grad, model.parameters())
+        
+        # Check parameter dtypes
+        param_dtypes = set(p.dtype for p in model.parameters() if p.requires_grad)
+        print(f"[DEBUG _create_optimizer] Parameter dtypes: {param_dtypes}")
 
         if self.config.optimizer_type in ["Adam", "AdamW"]:
             optimizer = optimizer_class(
@@ -165,25 +171,26 @@ class BaseProbeTrainer(ABC):
         activation_store: ActivationStore,
         position_key: str,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Prepare data for training, optionally applying standardization.
-
-        Computes standardization statistics if standardize_activations is True.
-        Returns:
-            X_train: Activations potentially standardized for training.
-            y: Labels.
-            X_orig: Original, non-standardized activations.
-        """
-        X_orig, y = activation_store.get_probe_data(position_key)
-        X_train = X_orig  # Default to original if no standardization
-
+        """Prepare data for training, optionally applying standardization."""
+        X_expected, y_expected = activation_store.get_probe_data(position_key)
+        
+        print(f"[DEBUG prepare_data] Raw X dtype from activation store: {X_expected.dtype}")
+        print(f"[DEBUG prepare_data] Raw y dtype from activation store: {y_expected.dtype}")
+        print(f"[DEBUG prepare_data] X shape: {X_expected.shape}, y shape: {y_expected.shape}")
+        
+        X_train = X_expected  # Default to original if no standardization
+    
         # Apply standardization only if configured
         if self.config.standardize_activations:
+            print(f"[DEBUG prepare_data] Applying standardization")
             # Compute statistics if not already done (e.g., first call)
             if self.feature_mean is None or self.feature_std is None:
-                self.feature_mean = X_orig.mean(dim=0, keepdim=True)
-                # Add epsilon for numerical stability
-                self.feature_std = X_orig.std(dim=0, keepdim=True) + 1e-8
-
+                self.feature_mean = X_expected.mean(dim=0, keepdim=True)
+                self.feature_std = X_expected.std(dim=0, keepdim=True) + 1e-8
+                
+                print(f"[DEBUG prepare_data] Feature mean dtype: {self.feature_mean.dtype}")
+                print(f"[DEBUG prepare_data] Feature std dtype: {self.feature_std.dtype}")
+    
                 # Move statistics to the correct device
                 if self.config.device:
                     target_device = torch.device(self.config.device)
@@ -194,15 +201,15 @@ class BaseProbeTrainer(ABC):
             if self.feature_mean is not None and self.feature_std is not None:
                 # Ensure X_orig is on the same device as stats before operation
                 if hasattr(self.feature_mean, "device"):
-                    X_orig_dev = X_orig.to(self.feature_mean.device)
+                    X_orig_dev = X_expected.to(self.feature_mean.device)
                     X_train = (X_orig_dev - self.feature_mean) / self.feature_std
                 else:
                     # Fallback if stats don't have device info (shouldn't happen)
-                    X_train = (X_orig - self.feature_mean) / self.feature_std
+                    X_train = (X_expected - self.feature_mean) / self.feature_std
+                
+                print(f"[DEBUG prepare_data] After standardization - X_train dtype: {X_train.dtype}")
 
-        return X_train, y, X_orig  # Return both training and original activations
-
-    # Removed transfer_stats_to_model
+        return X_train, y_expected, X_expected  # Return both training and original activations
 
 
 @dataclass
@@ -223,6 +230,7 @@ class SupervisedProbeTrainer(BaseProbeTrainer):
         if not isinstance(config, SupervisedTrainerConfig):
             raise TypeError("SupervisedProbeTrainer requires a SupervisedTrainerConfig")
         self.config: SupervisedTrainerConfig = config
+        print(f"[DEBUG SupervisedProbeTrainer.__init__] Initialized with train_ratio: {config.train_ratio}")
 
     def prepare_supervised_data(
         self,
@@ -239,6 +247,8 @@ class SupervisedProbeTrainer(BaseProbeTrainer):
         # Split data
         n_total = len(X_orig_all)
         n_train = int(n_total * self.config.train_ratio)
+        print(f"[DEBUG prepare_supervised_data] Total examples: {n_total}, Training examples: {n_train}")
+        
         # Ensure validation set is not empty
         if n_train == n_total:
             n_train = max(
@@ -300,6 +310,9 @@ class SupervisedProbeTrainer(BaseProbeTrainer):
         )
         y_val_split = y_val_split if y_val_split.dim() > 1 else y_val_split.unsqueeze(1)
 
+        print(f"[DEBUG prepare_supervised_data] Final X_train_split dtype: {X_train_split.dtype}")
+        print(f"[DEBUG prepare_supervised_data] Final y_train_split dtype: {y_train_split.dtype}")
+        
         # Note: We don't move tensors to device here because DataLoader will
         # create copies that could waste memory. Instead, we move tensors to
         # device in training loop just before using them.
@@ -335,34 +348,65 @@ class SupervisedProbeTrainer(BaseProbeTrainer):
             leave=False,
         )
 
-        for (
-            batch_x_train,
-            batch_y,
-            _,
-        ) in batch_pbar:  # Ignore X_orig during training pass
+        for batch_idx, (batch_x_train, batch_y, _) in enumerate(batch_pbar):  # Ignore X_orig during training pass
+            if batch_idx == 0:  # Only print for first batch
+                print(f"[DEBUG train_epoch] First batch - x dtype: {batch_x_train.dtype}, y dtype: {batch_y.dtype}")
+                print(f"[DEBUG train_epoch] Model dtype: {next(model.parameters()).dtype}")
+                print(f"[DEBUG train_epoch] Loss function: {type(loss_fn).__name__}")
+            
             optimizer.zero_grad()
             batch_x_train = batch_x_train.to(self.config.device)
             batch_y = batch_y.to(self.config.device)
+            
+            if batch_idx == 0:
+                print(f"[DEBUG train_epoch] After moving to device - x dtype: {batch_x_train.dtype}")
 
             # --- Adjust target shape/type for loss ---
+            model_dtype = next(model.parameters()).dtype
             if is_multi_class:
                 # CrossEntropyLoss expects Long targets of shape [N]
                 if batch_y.dim() == 2 and batch_y.shape[1] == 1:
                     batch_y = batch_y.squeeze(1)
                 batch_y = batch_y.long()  # Ensure Long type
-            else:  # BCEWithLogitsLoss expects Float targets
-                batch_y = batch_y.float()  # Ensure Float type
+                if batch_idx == 0:
+                    print(f"[DEBUG train_epoch] Using Long targets for multi-class: {batch_y.dtype}")
+            else:  # Other losses expect same dtype as model parameters
+                batch_y = batch_y.to(dtype=model_dtype)  # Ensure same dtype as model
+                if batch_idx == 0:
+                    print(f"[DEBUG train_epoch] Converted targets to model dtype: {batch_y.dtype}")
             # -----------------------------------------
 
             # Model forward pass uses the potentially standardized data
             outputs = model(batch_x_train)
-            loss = loss_fn(outputs, batch_y)
+            if batch_idx == 0:
+                print(f"[DEBUG train_epoch] Forward pass output dtype: {outputs.dtype}")
+                print(f"[DEBUG train_epoch] Target for loss dtype: {batch_y.dtype}")
 
-            loss.backward()
-            optimizer.step()
-
-            total_loss += loss.item()
-            batch_pbar.set_postfix({"Loss": f"{loss.item():.6f}"})
+            try:
+                loss = loss_fn(outputs, batch_y)
+                if batch_idx == 0:
+                    print(f"[DEBUG train_epoch] Loss computation dtype: {loss.dtype}")
+                
+                loss.backward()
+                if batch_idx == 0:
+                    # Check parameter gradients after backward
+                    for name, param in model.named_parameters():
+                        if param.grad is not None:
+                            print(f"[DEBUG train_epoch] Gradient for {name} - dtype: {param.grad.dtype}")
+                        else:
+                            print(f"[DEBUG train_epoch] No gradient for {name}")
+                
+                optimizer.step()
+                
+                total_loss += loss.item()
+                batch_pbar.set_postfix({"Loss": f"{loss.item():.6f}"})
+            except Exception as e:
+                print(f"[ERROR train_epoch] Exception during training: {str(e)}")
+                # Print detailed tensor information to debug dtype issues
+                print(f"[ERROR train_epoch] outputs shape: {outputs.shape}, dtype: {outputs.dtype}")
+                print(f"[ERROR train_epoch] batch_y shape: {batch_y.shape}, dtype: {batch_y.dtype}")
+                print(f"[ERROR train_epoch] loss_fn type: {type(loss_fn).__name__}")
+                raise  # Re-raise the exception
 
         return total_loss / len(train_loader)
 
@@ -385,8 +429,9 @@ class SupervisedProbeTrainer(BaseProbeTrainer):
 
         # Determine if this is a multi-class probe
         is_multi_class = isinstance(model, MultiClassLogisticProbe)
-        # num_classes = model.config.output_size if hasattr(model.config, 'output_size') else 1 # Removed
-
+        print(f"[DEBUG train] Model class: {model.__class__.__name__}, is_multi_class: {is_multi_class}")
+        print(f"[DEBUG train] Model dtype: {next(model.parameters()).dtype}")
+        
         # Standardization stats are managed by the trainer, not transferred
 
         optimizer = self._create_optimizer(model)
@@ -403,6 +448,10 @@ class SupervisedProbeTrainer(BaseProbeTrainer):
         if self.config.handle_class_imbalance:
             # Calculate all labels only once if needed for any weight calculation
             all_train_y = torch.cat([y for _, y, _ in train_loader])
+            print(f"[DEBUG train] Combined labels for class weights - shape: {all_train_y.shape}, dtype: {all_train_y.dtype}")
+
+        model_dtype = next(model.parameters()).dtype
+        print(f"[DEBUG train] Setting up loss function for dtype: {model_dtype}")
 
         if isinstance(model, MultiClassLogisticProbe):
             weights_arg: Optional[torch.Tensor] = None
@@ -410,7 +459,8 @@ class SupervisedProbeTrainer(BaseProbeTrainer):
                 num_classes = model.config.output_size
                 class_weights = self._calculate_class_weights(all_train_y, num_classes)
                 if class_weights is not None:
-                    weights_arg = class_weights.to(target_device)
+                    weights_arg = class_weights.to(target_device).to(dtype=model_dtype)
+                    print(f"[DEBUG train] Class weights set to dtype: {weights_arg.dtype}")
             # Pass `class_weights` keyword arg
             loss_fn = model.get_loss_fn(class_weights=weights_arg)
 
@@ -419,13 +469,17 @@ class SupervisedProbeTrainer(BaseProbeTrainer):
             if self.config.handle_class_imbalance and all_train_y is not None:
                 pos_weight = self._calculate_pos_weights(all_train_y)
                 if pos_weight is not None:
-                    weights_arg = pos_weight.to(target_device)
+                    weights_arg = pos_weight.to(target_device).to(dtype=model_dtype)
+                    print(f"[DEBUG train] Pos weights set to dtype: {weights_arg.dtype}")
             # Pass `pos_weight` keyword arg
             loss_fn = model.get_loss_fn(pos_weight=weights_arg)
 
         elif isinstance(model, LinearProbe):
             # LinearProbe loss (MSE, L1, Cosine) doesn't use these weights
             loss_fn = model.get_loss_fn()
+            # Ensure loss function is of the correct dtype
+            loss_fn = loss_fn.to(dtype=model_dtype)
+            print(f"[DEBUG train] Linear loss type: {model.config.loss_type}")
             if self.config.handle_class_imbalance:
                 print(
                     f"Warning: Class imbalance handling enabled, but may not be effective "
@@ -442,9 +496,13 @@ class SupervisedProbeTrainer(BaseProbeTrainer):
             if self.config.handle_class_imbalance and all_train_y is not None:
                 pos_weight = self._calculate_pos_weights(all_train_y)
                 if pos_weight is not None:
-                    weights_arg = pos_weight.to(target_device)
+                    weights_arg = pos_weight.to(target_device).to(dtype=model_dtype)
             # Assume BCE loss for unknown types
-            loss_fn = nn.BCEWithLogitsLoss(pos_weight=weights_arg)
+            loss_fn = nn.BCEWithLogitsLoss(pos_weight=weights_arg).to(dtype=model_dtype)
+        
+        # Ensure loss function is on the correct device
+        loss_fn = loss_fn.to(device=target_device)
+        print(f"[DEBUG train] Loss function: {type(loss_fn).__name__}")
         # --- End Loss Function Setup ---
 
         # Training history
@@ -520,10 +578,12 @@ class SupervisedProbeTrainer(BaseProbeTrainer):
             with torch.no_grad():
                 # Get the direction learned on standardized data
                 learned_direction = model._get_raw_direction_representation()
+                print(f"[DEBUG train] Learned direction dtype before unscaling: {learned_direction.dtype}")
 
                 # Unscale the direction
                 # Ensure std dev matches direction dims for division
                 std_dev = self.feature_std.squeeze().to(learned_direction.device)
+                print(f"[DEBUG train] Feature std dtype for unscaling: {std_dev.dtype}")
 
                 # Handle potential shape mismatches (e.g., [1, dim] vs [dim])
                 if (
@@ -533,8 +593,10 @@ class SupervisedProbeTrainer(BaseProbeTrainer):
                 ):
                     # Common case for Linear/Logistic: weights are [1, dim], std_dev is [dim]
                     unscaled_direction = learned_direction / std_dev.unsqueeze(0)
+                    print(f"[DEBUG train] Unscaled case 1: shape {unscaled_direction.shape}")
                 elif learned_direction.shape == std_dev.shape:
                     unscaled_direction = learned_direction / std_dev
+                    print(f"[DEBUG train] Unscaled case 2: shape {unscaled_direction.shape}")
                 elif (
                     learned_direction.dim() == 1
                     and std_dev.dim() == 1
@@ -542,6 +604,7 @@ class SupervisedProbeTrainer(BaseProbeTrainer):
                 ):
                     # Case for single vector directions (like maybe directional probes before squeeze?)
                     unscaled_direction = learned_direction / std_dev
+                    print(f"[DEBUG train] Unscaled case 3: shape {unscaled_direction.shape}")
                 else:
                     print(
                         f"Warning: Shape mismatch during final unscaling. Direction: {learned_direction.shape}, StdDev: {std_dev.shape}. Skipping unscaling."
@@ -549,7 +612,10 @@ class SupervisedProbeTrainer(BaseProbeTrainer):
                     unscaled_direction = (
                         learned_direction  # Keep original if shapes mismatch
                     )
+                    print(f"[DEBUG train] Using original direction due to shape mismatch")
 
+                print(f"[DEBUG train] Unscaled direction dtype: {unscaled_direction.dtype}")
+                
                 # Update the probe's internal representation with the unscaled direction
                 model._set_raw_direction_representation(unscaled_direction)
 
@@ -565,9 +631,13 @@ class SupervisedProbeTrainer(BaseProbeTrainer):
         """Run validation with progress tracking. Uses X_orig for validation."""
         model.eval()
         total_loss = 0
+        model_dtype = next(model.parameters()).dtype
 
         with torch.no_grad():
-            for _, batch_y, batch_x_orig in val_loader:  # Use X_orig for validation
+            for batch_idx, (_, batch_y, batch_x_orig) in enumerate(val_loader):  # Use X_orig for validation
+                if batch_idx == 0:
+                    print(f"[DEBUG validate] Validation batch - orig x dtype: {batch_x_orig.dtype}, y dtype: {batch_y.dtype}")
+                
                 batch_x_orig = batch_x_orig.to(self.config.device)
                 batch_y = batch_y.to(self.config.device)
 
@@ -577,15 +647,30 @@ class SupervisedProbeTrainer(BaseProbeTrainer):
                     if batch_y.dim() == 2 and batch_y.shape[1] == 1:
                         batch_y = batch_y.squeeze(1)
                     batch_y = batch_y.long()  # Ensure Long type
-                else:  # BCEWithLogitsLoss expects Float targets
-                    batch_y = batch_y.float()  # Ensure Float type
+                    if batch_idx == 0:
+                        print(f"[DEBUG validate] Using Long targets for multi-class: {batch_y.dtype}")
+                else:
+                    # Ensure target has same dtype as model for consistent loss calculation
+                    batch_y = batch_y.to(dtype=model_dtype)
+                    if batch_idx == 0:
+                        print(f"[DEBUG validate] Converted targets to model dtype: {batch_y.dtype}")
                 # -----------------------------------------
 
                 # Model forward pass uses original (non-standardized) data
                 # Assumes the probe direction has been unscaled if needed after training
                 outputs = model(batch_x_orig)
-                loss = loss_fn(outputs, batch_y)
-                total_loss += loss.item()
+                if batch_idx == 0:
+                    print(f"[DEBUG validate] Validation output dtype: {outputs.dtype}")
+                
+                try:
+                    loss = loss_fn(outputs, batch_y)
+                    total_loss += loss.item()
+                except Exception as e:
+                    print(f"[ERROR validate] Exception during validation: {str(e)}")
+                    print(f"[ERROR validate] outputs shape: {outputs.shape}, dtype: {outputs.dtype}")
+                    print(f"[ERROR validate] batch_y shape: {batch_y.shape}, dtype: {batch_y.dtype}")
+                    print(f"[ERROR validate] loss_fn type: {type(loss_fn).__name__}")
+                    raise  # Re-raise the exception
 
         return total_loss / len(val_loader)
 
@@ -608,6 +693,7 @@ class DirectionalProbeTrainer(BaseProbeTrainer):
                 "DirectionalProbeTrainer requires a DirectionalTrainerConfig"
             )
         self.config: DirectionalTrainerConfig = config
+        print(f"[DEBUG DirectionalProbeTrainer.__init__] Initialized")
 
     def prepare_supervised_data(
         self,
@@ -641,6 +727,9 @@ class DirectionalProbeTrainer(BaseProbeTrainer):
             shuffle=False,  # No need to shuffle if using full batch
         )
 
+        print(f"[DEBUG prepare_supervised_data] Created dataloader with batch size: {batch_size_fit}")
+        print(f"[DEBUG prepare_supervised_data] X dtype: {X_train_all.dtype}, y dtype: {y_all.dtype}")
+
         # Return the same loader twice to maintain the trainer interface
         return all_data_loader, all_data_loader
 
@@ -665,6 +754,9 @@ class DirectionalProbeTrainer(BaseProbeTrainer):
                 "DirectionalProbeTrainer expects model to be an instance of DirectionalProbe"
             )
 
+        print(f"[DEBUG DirectionalProbeTrainer.train] Model class: {model.__class__.__name__}")
+        print(f"[DEBUG DirectionalProbeTrainer.train] Model dtype: {model.dtype}")
+
         # Ensure model is on the correct device
         target_device = torch.device(self.config.device)
         model.to(target_device)
@@ -674,6 +766,7 @@ class DirectionalProbeTrainer(BaseProbeTrainer):
         # Accumulate all data (loader should have batch_size=len(dataset))
         try:
             x_train_tensor, y_train_tensor, x_orig_tensor = next(iter(train_loader))
+            print(f"[DEBUG DirectionalProbeTrainer.train] Loaded data - x_train dtype: {x_train_tensor.dtype}, y dtype: {y_train_tensor.dtype}")
         except StopIteration:
             print("Warning: Training loader is empty.")
             return {"train_loss": [], "val_loss": []}  # Return empty history
@@ -681,19 +774,27 @@ class DirectionalProbeTrainer(BaseProbeTrainer):
         x_train_tensor = x_train_tensor.to(target_device)
         y_train_tensor = y_train_tensor.to(target_device)
         x_orig_tensor = x_orig_tensor.to(target_device)  # Keep original data too
+        print(f"[DEBUG DirectionalProbeTrainer.train] Data moved to device {target_device}")
 
         # Fit the probe using potentially standardized data (X_train)
         # The fit method now returns the initial direction (potentially scaled)
+        print(f"[DEBUG DirectionalProbeTrainer.train] Calling probe.fit() method")
         initial_direction = model.fit(x_train_tensor, y_train_tensor)
+
+        print(f"[DEBUG DirectionalProbeTrainer.train] After fit - initial_direction dtype: {initial_direction.dtype}")
+        print(f"[DEBUG DirectionalProbeTrainer.train] After fit - initial_direction shape: {initial_direction.shape}")
 
         # --- Unscale Direction ---
         final_direction = initial_direction  # Default if no standardization
         if self.config.standardize_activations and self.feature_std is not None:
-            print("Unscaling directional probe direction...")
+            print("[DEBUG DirectionalProbeTrainer.train] Unscaling directional probe direction...")
+            print(f"[DEBUG DirectionalProbeTrainer.train] feature_std dtype: {self.feature_std.dtype}")
             std_dev = self.feature_std.squeeze().to(initial_direction.device)
+            
             # Assume initial_direction is [dim]
             if initial_direction.shape == std_dev.shape:
                 final_direction = initial_direction / std_dev
+                print(f"[DEBUG DirectionalProbeTrainer.train] Unscaled with case 1 (same shape)")
             # Add case for [1, dim] direction and [dim] std_dev
             elif (
                 initial_direction.dim() == 2
@@ -701,14 +802,20 @@ class DirectionalProbeTrainer(BaseProbeTrainer):
                 and std_dev.dim() == 1
             ):
                 final_direction = initial_direction / std_dev.unsqueeze(0)
+                print(f"[DEBUG DirectionalProbeTrainer.train] Unscaled with case 2 (unsqueezed std)")
             else:
                 print(
                     f"Warning: Shape mismatch during directional probe unscaling. "
                     f"Direction: {initial_direction.shape}, StdDev: {std_dev.shape}. "
                     f"Skipping unscaling."
                 )
+                print(f"[DEBUG DirectionalProbeTrainer.train] Keeping original direction due to shape mismatch")
+
+            print(f"[DEBUG DirectionalProbeTrainer.train] Final direction dtype after unscaling: {final_direction.dtype}")
+            print(f"[DEBUG DirectionalProbeTrainer.train] Final direction shape after unscaling: {final_direction.shape}")
 
         # Set the final, unscaled direction in the probe's buffer
+        print(f"[DEBUG DirectionalProbeTrainer.train] Setting final direction in probe")
         model._set_raw_direction_representation(final_direction)
 
         # --- Compute Metrics ---
@@ -722,16 +829,25 @@ class DirectionalProbeTrainer(BaseProbeTrainer):
 
         # Calculate loss using original data and final probe state
         with torch.no_grad():
+            print(f"[DEBUG DirectionalProbeTrainer.train] Computing metrics with original data")
             # Probe forward uses the final (unscaled) direction set above
             preds = model(x_orig_tensor)
+            print(f"[DEBUG DirectionalProbeTrainer.train] Prediction dtype: {preds.dtype}")
+            
             # Ensure y_train_tensor matches expected shape for loss
-            y_target = y_train_tensor.float()
+            # Get model's dtype for loss calculation
+            model_dtype = model.dtype  # Use model.dtype directly as DirectionalProbe has this attribute
+            y_target = y_train_tensor.to(dtype=model_dtype)
+            print(f"[DEBUG DirectionalProbeTrainer.train] Target dtype for loss: {y_target.dtype}")
+            
             if preds.dim() == 1 and y_target.dim() == 2 and y_target.shape[1] == 1:
                 y_target = y_target.squeeze(1)
+                print(f"[DEBUG DirectionalProbeTrainer.train] Squeezed y_target shape: {y_target.shape}")
             elif preds.shape != y_target.shape:
                 # Attempt to align shapes if possible (e.g., [N] vs [N, 1])
                 try:
                     y_target = y_target.view_as(preds)
+                    print(f"[DEBUG DirectionalProbeTrainer.train] Reshaped y_target to match preds: {y_target.shape}")
                 except RuntimeError:
                     print(
                         f"Warning: Could not align prediction ({preds.shape}) and "
@@ -744,19 +860,31 @@ class DirectionalProbeTrainer(BaseProbeTrainer):
 
             # Use BCEWithLogitsLoss as it's common for binary classification probes
             # Use original y labels
+            loss_item = float("nan")  # Default value if calculation fails
             try:
                 # Use the appropriate loss based on the probe type
                 if isinstance(model, MultiClassLogisticProbe):
-                    loss_fn = nn.CrossEntropyLoss()
+                    print(f"[DEBUG DirectionalProbeTrainer.train] Using CrossEntropyLoss for multi-class")
+                    loss_fn = nn.CrossEntropyLoss().to(device=target_device, dtype=model_dtype)
                     y_target = y_target.long().squeeze()  # Ensure long and [N] shape
                 else:
-                    loss_fn = nn.BCEWithLogitsLoss()
+                    print(f"[DEBUG DirectionalProbeTrainer.train] Using BCEWithLogitsLoss for binary")
+                    loss_fn = nn.BCEWithLogitsLoss().to(device=target_device, dtype=model_dtype)
                     # y_target is already float
+                
+                print(f"[DEBUG DirectionalProbeTrainer.train] Loss function: {type(loss_fn).__name__}")
+                print(f"[DEBUG DirectionalProbeTrainer.train] Final shapes - preds: {preds.shape}, y_target: {y_target.shape}")
+                print(f"[DEBUG DirectionalProbeTrainer.train] Final dtypes - preds: {preds.dtype}, y_target: {y_target.dtype}")
 
                 loss = loss_fn(preds, y_target)
                 loss_item = loss.item()
+                print(f"[DEBUG DirectionalProbeTrainer.train] Loss calculated: {loss_item}")
             except Exception as e:
-                print(f"Error during loss calculation: {e}")
+                print(f"[ERROR DirectionalProbeTrainer.train] Error during loss calculation: {e}")
+                # Provide detailed information about the tensor shapes and types
+                print(f"[ERROR DirectionalProbeTrainer.train] preds shape: {preds.shape}, dtype: {preds.dtype}")
+                print(f"[ERROR DirectionalProbeTrainer.train] y_target shape: {y_target.shape}, dtype: {y_target.dtype}")
+                # Still set loss_item to NaN so history recording continues
 
         history["train_loss"].append(loss_item)
         history["val_loss"].append(loss_item)  # Use same loss for val

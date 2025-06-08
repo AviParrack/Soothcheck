@@ -24,11 +24,17 @@ class DirectionalProbe(BaseProbe[T]):
         input_size = _get_config_attr(config, "input_size")
         if input_size is None:
             raise ValueError("Config must have input_size for DirectionalProbe")
+        
+        print(f"[DEBUG DirectionalProbe.__init__] self.dtype: {self.dtype}")
+        print(f"[DEBUG DirectionalProbe.__init__] Creating direction_vector with dtype: {self.dtype}")
+        
         self.register_buffer(
             "direction_vector",
             torch.zeros(input_size, dtype=self.dtype),
             persistent=True,
         )
+        
+        print(f"[DEBUG DirectionalProbe.__init__] direction_vector dtype after creation: {self.direction_vector.dtype}")
         # Flag to indicate if fit has been run and direction is valid
         self.has_fit: bool = False
 
@@ -167,14 +173,31 @@ class KMeansProbe(DirectionalProbe[KMeansProbeConfig]):
         Input x may be standardized by the trainer.
         Returns the computed direction tensor *before* potential unscaling.
         """
+        print(f"[DEBUG KMeansProbe.fit] Input x dtype: {x.dtype}, shape: {x.shape}")
+        print(f"[DEBUG KMeansProbe.fit] self.dtype: {self.dtype}")
+        
         if y is None:
             raise ValueError(
                 "KMeansProbe requires labels (y) to determine centroid polarity."
             )
 
-        # K-means expects float32
-        x_np = x.cpu().numpy().astype(np.float32)
-        y_np = y.cpu().numpy()
+        # Convert bfloat16 to float32 for NumPy compatibility
+        if x.dtype == torch.bfloat16:
+            print(f"[DEBUG KMeansProbe.fit] Converting from bfloat16 to float32 for NumPy")
+            x_float32 = x.to(torch.float32)
+            x_np = x_float32.cpu().numpy()
+        else:
+            # K-means expects float32
+            x_np = x.cpu().numpy().astype(np.float32)
+        
+        # Convert labels to numpy
+        if y.dtype == torch.bfloat16:
+            y_float32 = y.to(torch.float32)
+            y_np = y_float32.cpu().numpy()
+        else:
+            y_np = y.cpu().numpy()
+        
+        print(f"[DEBUG KMeansProbe.fit] NumPy array dtype: {x_np.dtype}")
 
         self.kmeans_model = KMeans(
             n_clusters=self.config.n_clusters,
@@ -268,6 +291,9 @@ class KMeansProbe(DirectionalProbe[KMeansProbeConfig]):
         initial_direction_tensor = torch.tensor(
             initial_direction_np, device=self.config.device, dtype=self.dtype
         )
+        
+        print(f"[DEBUG KMeansProbe.fit] Direction dtype: {initial_direction_tensor.dtype}")
+        print(f"[DEBUG KMeansProbe.fit] Direction shape: {initial_direction_tensor.shape}")
 
         # Mark fit as having run (direction_vector buffer is set by trainer later)
         # self.has_fit = True # DO NOT SET here, trainer does after unscaling
@@ -286,8 +312,19 @@ class PCAProbe(DirectionalProbe[PCAProbeConfig]):
         Input x may be standardized by the trainer.
         Returns the computed direction tensor *before* potential unscaling.
         """
-        # PCA works best with float32 or float64
-        x_np = x.cpu().numpy().astype(np.float32)
+        print(f"[DEBUG PCAProbe.fit] Input x dtype: {x.dtype}, shape: {x.shape}")
+        print(f"[DEBUG PCAProbe.fit] self.dtype: {self.dtype}")
+        
+        # Convert bfloat16 to float32 for NumPy compatibility
+        if x.dtype == torch.bfloat16:
+            print(f"[DEBUG PCAProbe.fit] Converting from bfloat16 to float32 for NumPy")
+            x_float32 = x.to(torch.float32)
+            x_np = x_float32.cpu().numpy()
+        else:
+            # PCA works best with float32 or float64
+            x_np = x.cpu().numpy().astype(np.float32)
+        
+        print(f"[DEBUG PCAProbe.fit] NumPy array dtype: {x_np.dtype}")
 
         # Ensure n_components is valid
         n_samples, n_features = x_np.shape
@@ -318,7 +355,13 @@ class PCAProbe(DirectionalProbe[PCAProbeConfig]):
 
         # Determine sign based on correlation with labels if provided
         if y is not None:
-            y_np = y.cpu().numpy()
+            # Convert labels to numpy, handling bfloat16 if needed
+            if y.dtype == torch.bfloat16:
+                y_float32 = y.to(torch.float32)
+                y_np = y_float32.cpu().numpy()
+            else:
+                y_np = y.cpu().numpy()
+                
             if y_np.ndim > 1:
                 y_np = y_np.squeeze()
 
@@ -351,6 +394,9 @@ class PCAProbe(DirectionalProbe[PCAProbeConfig]):
         initial_direction_tensor = torch.tensor(
             pc1, device=self.config.device, dtype=self.dtype
         )
+        
+        print(f"[DEBUG PCAProbe.fit] Direction dtype: {initial_direction_tensor.dtype}")
+        print(f"[DEBUG PCAProbe.fit] Direction shape: {initial_direction_tensor.shape}")
 
         # Mark fit as having run (direction_vector buffer is set by trainer later)
         # self.has_fit = True # DO NOT SET here
@@ -365,12 +411,17 @@ class MeanDifferenceProbe(DirectionalProbe[MeanDiffProbeConfig]):
         Input x may be standardized by the trainer.
         Returns the computed direction tensor *before* potential unscaling.
         """
+        print(f"[DEBUG MeanDifferenceProbe.fit] Input x dtype: {x.dtype}, shape: {x.shape}")
+        print(f"[DEBUG MeanDifferenceProbe.fit] self.dtype: {self.dtype}")
+        
         if y is None:
             raise ValueError("MeanDifferenceProbe requires labels (y).")
 
         # Ensure consistent dtypes and device
         x = x.to(dtype=self.dtype, device=self.config.device)
         y = y.to(device=self.config.device)  # Let mask handle dtype comparison
+
+        print(f"[DEBUG MeanDifferenceProbe.fit] After conversion - x dtype: {x.dtype}")
 
         # Calculate means for positive (1) and negative (0) classes
         # Ensure y is boolean or integer {0, 1} for masking
@@ -402,6 +453,9 @@ class MeanDifferenceProbe(DirectionalProbe[MeanDiffProbeConfig]):
         # Direction from negative to positive mean
         # This initial direction is potentially in the standardized space
         initial_direction_tensor = pos_mean - neg_mean
+
+        print(f"[DEBUG MeanDifferenceProbe.fit] Initial direction dtype: {initial_direction_tensor.dtype}")
+        print(f"[DEBUG MeanDifferenceProbe.fit] Initial direction shape: {initial_direction_tensor.shape}")
 
         # Return the initial direction
         # self.has_fit = True # DO NOT SET here
