@@ -15,65 +15,6 @@ import seaborn as sns
 from probity.probes import BaseProbe
 from utils import load_lie_truth_dataset, get_model_dtype
 
-
-# class MemoryEfficientProbeInference:
-#     """Memory efficient probe inference using shared model"""
-#     def __init__(self, model, hook_point, probe, device):
-#         self.model = model
-#         self.hook_point = hook_point
-#         self.probe = probe.to(device)
-#         self.device = device
-#         self.probe.eval()
-    
-#     def get_activations(self, texts: List[str]) -> torch.Tensor:
-#         """Get activations for texts using the model"""
-#         if hasattr(self.model, 'tokenizer'):
-#             tokenizer = self.model.tokenizer
-#         else:
-#             from transformers import AutoTokenizer
-#             tokenizer = AutoTokenizer.from_pretrained(self.model.cfg.model_name)
-        
-#         activations_list = []
-        
-#         for text in texts:
-#             tokens = tokenizer.encode(text, return_tensors="pt").to(self.device)
-            
-#             # Use hook to get activations
-#             with torch.no_grad():
-#                 _, cache = self.model.run_with_cache(
-#                     tokens,
-#                     names_filter=[self.hook_point],
-#                     return_cache_object=True
-#                 )
-#                 activations_list.append(cache[self.hook_point].cpu())
-        
-#         return torch.cat(activations_list, dim=0)
-    
-#     def get_scores(self, texts: List[str]) -> np.ndarray:
-#         """Get probe scores for texts"""
-#         activations = self.get_activations(texts)
-        
-#         # Get scores at LIE_SPAN positions
-#         scores = []
-#         with torch.no_grad():
-#             # For simplicity, taking mean activation across sequence
-#             # In practice, should use token positions from dataset
-#             for act in activations:
-#                 if hasattr(self.probe, 'forward'):
-#                     score = self.probe.forward(act.mean(dim=0, keepdim=True).to(self.device))
-#                 else:
-#                     score = self.probe(act.mean(dim=0, keepdim=True).to(self.device))
-                
-#                 if hasattr(score, 'sigmoid'):
-#                     score = torch.sigmoid(score)
-#                 elif self.probe.__class__.__name__ == 'LogisticProbe':
-#                     score = torch.sigmoid(score)
-                
-#                 scores.append(score.cpu().numpy().item())
-        
-#         return np.array(scores)
-
-
 class MemoryEfficientProbeInference:
     """Memory efficient probe inference using shared model"""
     def __init__(self, model, hook_point, probe, device):
