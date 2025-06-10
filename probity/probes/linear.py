@@ -12,28 +12,13 @@ class LinearProbe(BaseProbe[LinearProbeConfig]):
     Operates on original activation space.
     """
 
-    # def __init__(self, config: LinearProbeConfig):
-    #     super().__init__(config)
-    #     self.linear = nn.Linear(config.input_size, config.output_size, bias=config.bias)
-
-    #     # Initialize weights (optional, can use default PyTorch init)
-    #     nn.init.kaiming_uniform_(self.linear.weight, nonlinearity="linear")
-    #     if config.bias and self.linear.bias is not None:
-    #         nn.init.zeros_(self.linear.bias)
-
-
     def __init__(self, config: LinearProbeConfig):
         super().__init__(config)
-        print(f"[DEBUG LinearProbe.__init__] Before Linear creation - self.dtype: {self.dtype}")
         
         self.linear = nn.Linear(config.input_size, config.output_size, bias=config.bias)
         
-        print(f"[DEBUG LinearProbe.__init__] Linear layer weight dtype: {self.linear.weight.dtype}")
-        
         # Convert to correct dtype
         self.linear = self.linear.to(dtype=self.dtype)
-        
-        print(f"[DEBUG LinearProbe.__init__] After dtype conversion - weight dtype: {self.linear.weight.dtype}")
         
         # Initialize weights (optional, can use default PyTorch init)
         nn.init.kaiming_uniform_(self.linear.weight, nonlinearity="linear")

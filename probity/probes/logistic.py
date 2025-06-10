@@ -9,56 +9,29 @@ from .config import LogisticProbeConfig, MultiClassLogisticProbeConfig
 class LogisticProbe(BaseProbe[LogisticProbeConfig]):
     """Logistic regression probe implemented using nn.Linear. Operates on original activation space."""
 
-    # def __init__(self, config: LogisticProbeConfig):
-    #     super().__init__(config)
-    #     # Logistic regression is essentially a linear layer followed by sigmoid (handled by loss)
-    #     self.linear = nn.Linear(config.input_size, config.output_size, bias=config.bias)
-
-    #     # Initialize weights (zeros often work well for logistic init)
-    #     nn.init.zeros_(self.linear.weight)
-    #     if config.bias and self.linear.bias is not None:
-    #         nn.init.zeros_(self.linear.bias)
-
     def __init__(self, config: LogisticProbeConfig):
         super().__init__(config)
-        print(f"[DEBUG LogisticProbe.__init__] Before Linear creation - self.dtype: {self.dtype}")
         
         # Logistic regression is essentially a linear layer followed by sigmoid (handled by loss)
         self.linear = nn.Linear(config.input_size, config.output_size, bias=config.bias)
         
-        print(f"[DEBUG LogisticProbe.__init__] Linear layer weight dtype: {self.linear.weight.dtype}")
-        print(f"[DEBUG LogisticProbe.__init__] Linear layer bias dtype: {self.linear.bias.dtype if self.linear.bias is not None else 'No bias'}")
-        
         # Convert to correct dtype
         self.linear = self.linear.to(dtype=self.dtype)
-        
-        print(f"[DEBUG LogisticProbe.__init__] After dtype conversion - weight dtype: {self.linear.weight.dtype}")
-        print(f"[DEBUG LogisticProbe.__init__] After dtype conversion - bias dtype: {self.linear.bias.dtype if self.linear.bias is not None else 'No bias'}")
-        
+
         # Initialize weights (zeros often work well for logistic init)
         nn.init.zeros_(self.linear.weight)
         if config.bias and self.linear.bias is not None:
             nn.init.zeros_(self.linear.bias)
 
-    
-    # def forward(self, x: torch.Tensor) -> torch.Tensor:
-    #     """Forward pass. Returns logits. Input x is expected in the original activation space."""
-    #     # Standardization is handled by the trainer externally if needed
-    #     return self.linear(x)
         
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Forward pass. Returns logits. Input x is expected in the original activation space."""
-        print(f"[DEBUG LogisticProbe.forward] Input x dtype: {x.dtype}, shape: {x.shape}")
-        print(f"[DEBUG LogisticProbe.forward] Linear weight dtype: {self.linear.weight.dtype}")
-        print(f"[DEBUG LogisticProbe.forward] self.dtype: {self.dtype}")
         
         # Ensure x matches linear layer dtype
         if x.dtype != self.linear.weight.dtype:
-            print(f"[DEBUG LogisticProbe.forward] Converting x from {x.dtype} to {self.linear.weight.dtype}")
             x = x.to(dtype=self.linear.weight.dtype)
         
         output = self.linear(x)
-        print(f"[DEBUG LogisticProbe.forward] Output dtype: {output.dtype}")
         return output
 
     def _get_raw_direction_representation(self) -> torch.Tensor:

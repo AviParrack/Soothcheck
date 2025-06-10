@@ -6,8 +6,6 @@ import json
 from typing import Optional, Generic, TypeVar, TYPE_CHECKING, get_args, get_origin, Any
 import importlib
 
-# Use TYPE_CHECKING to avoid circular imports at runtime
-# if TYPE_CHECKING:
 from .config import (
         ProbeConfig,
         LinearProbeConfig,
@@ -16,53 +14,28 @@ from .config import (
         KMeansProbeConfig,
         PCAProbeConfig,
         MeanDiffProbeConfig,
-        SklearnLogisticProbeConfig,  # Assuming this might be needed
-        LogisticProbeConfigBase,  # Add the base config too
+        SklearnLogisticProbeConfig,
+        LogisticProbeConfigBase,
     )
 
-# from .config import ProbeConfig, MeanDiffProbeConfig
-
-
-# Generic type variable bound by ProbeConfig
 T = TypeVar("T", bound="ProbeConfig")
 
-
-# Helper function to get attribute safely
 def _get_config_attr(config, attr_name, default=None):
     return getattr(config, attr_name, default)
 
-
-# Helper function to set attribute safely if it exists
 def _set_config_attr(config, attr_name, value):
     if hasattr(config, attr_name):
         setattr(config, attr_name, value)
-
 
 class BaseProbe(ABC, nn.Module, Generic[T]):
     """Abstract base class for probes. Probes store directions in the original activation space."""
 
     config: T  # Type hint for config instance
 
-    # def __init__(self, config: T):
-    #     super().__init__()
-    #     self.config = config
-    #     self.dtype = (
-    #         torch.float32
-    #         if _get_config_attr(config, "dtype", "float32") == "float32"
-    #         else torch.float16
-    #     )
-    #     self.name = (
-    #         _get_config_attr(config, "name", "unnamed_probe") or "unnamed_probe"
-    #     )  # Ensure name is not None
-    #     # Standardization is handled by the trainer, not stored in the probe.
-
-
     def __init__(self, config: T):
         super().__init__()
         self.config = config
-        # Support bfloat16 in addition to float32 and float16
         dtype_str = _get_config_attr(config, "dtype", "float32")
-        print(f"[DEBUG BaseProbe.__init__] Config dtype string: {dtype_str}")
         
         if dtype_str == "bfloat16":
             self.dtype = torch.bfloat16
@@ -70,9 +43,6 @@ class BaseProbe(ABC, nn.Module, Generic[T]):
             self.dtype = torch.float16
         else:
             self.dtype = torch.float32
-        
-        print(f"[DEBUG BaseProbe.__init__] Set self.dtype to: {self.dtype}")
-        print(f"[DEBUG BaseProbe.__init__] Probe class: {self.__class__.__name__}")
         
         self.name = (
             _get_config_attr(config, "name", "unnamed_probe") or "unnamed_probe"
@@ -106,9 +76,7 @@ class BaseProbe(ABC, nn.Module, Generic[T]):
 
     def encode(self, acts: torch.Tensor) -> torch.Tensor:
         """Compute dot product between activations and the probe direction."""
-        # Ensure direction is normalized for consistent projection magnitude
         direction = self.get_direction(normalized=True)
-        # Ensure consistent dtypes for einsum
         acts = acts.to(dtype=self.dtype)
         direction = direction.to(dtype=self.dtype)
         return torch.einsum("...d,d->...", acts, direction)
@@ -119,29 +87,22 @@ class BaseProbe(ABC, nn.Module, Generic[T]):
         if save_dir:
             os.makedirs(save_dir, exist_ok=True)
 
-        config_dict = self.config.__dict__.copy()  # Work on a copy
+        config_dict = self.config.__dict__.copy()
         additional_info = config_dict.get("additional_info", {})
 
-        # Clear previous standardization info if present in older saves
         additional_info.pop("is_standardized", None)
         additional_info.pop("feature_mean", None)
         additional_info.pop("feature_std", None)
 
-        # Save bias info if relevant (e.g., for LinearProbe, LogisticProbe)
-        # Check for linear layer and bias attribute
         has_bias_param = False
-        if hasattr(self, "linear") and isinstance(
-            self.linear, nn.Module
-        ):  # Ensure self.linear exists and is a module
+        if hasattr(self, "linear") and isinstance(self.linear, nn.Module):
             if hasattr(self.linear, "bias") and self.linear.bias is not None:
                 has_bias_param = True
         elif hasattr(self, "intercept_"):
-            # Handle SklearnLogisticProbe case where bias is stored in intercept_
             has_bias_param = self.intercept_ is not None
 
         additional_info["has_bias"] = has_bias_param
 
-        # Ensure config reflects runtime normalization choice if needed for reconstruction
         if hasattr(self.config, "normalize_weights"):
             additional_info["normalize_weights"] = _get_config_attr(
                 self.config, "normalize_weights"
@@ -151,111 +112,16 @@ class BaseProbe(ABC, nn.Module, Generic[T]):
 
         config_dict["additional_info"] = additional_info
 
-        # Re-create config object from dict to ensure it's serializable if it was a complex type initially
-        # This step might not be strictly necessary if the config is always a simple dataclass
-        # but adds robustness.
         config_to_save = type(self.config)(**config_dict)
 
-        # Save full state
         torch.save(
             {
                 "state_dict": self.state_dict(),
-                "config": config_to_save,  # Save the potentially modified config
+                "config": config_to_save,
                 "probe_type": self.__class__.__name__,
             },
             path,
         )
-
-    @classmethod
-    def load(cls, path: str, device: Optional[str] = None) -> "BaseProbe":
-        """Load probe from saved state (.pt or .json file). Dynamically determines format."""
-        if not os.path.exists(path):
-            raise FileNotFoundError(f"No saved probe file found at {path}")
-
-        if path.endswith(".json"):
-            # Delegate to load_json if it's explicitly JSON
-            return cls.load_json(path, device=device)
-        else:
-            # Assume .pt format otherwise
-            map_location = device or ("cuda" if torch.cuda.is_available() else "cpu")
-            data = torch.load(path, map_location=map_location, weights_only=False)
-
-            saved_config = data["config"]
-            probe_type_name = data.get("probe_type", cls.__name__)
-
-            # Dynamically find the correct probe class using the saved type name
-            probe_cls = cls._get_probe_class_by_name(probe_type_name)
-
-            # Create probe instance using the loaded config
-            # Ensure the config object is of the correct type expected by the probe_cls
-            if not isinstance(saved_config, probe_cls.__orig_bases__[0].__args__[0]):
-                print(
-                    f"Warning: Loaded config type {type(saved_config)} might not match expected type {probe_cls.__orig_bases__[0].__args__[0]} for {probe_type_name}. Attempting to recreate."
-                )
-                try:
-                    config_cls = probe_cls.__orig_bases__[0].__args__[0]
-                    # Create a new config instance, transferring attributes
-                    new_config = config_cls(
-                        input_size=saved_config.input_size
-                    )  # Start with mandatory fields
-                    for k, v in saved_config.__dict__.items():
-                        if hasattr(new_config, k):
-                            setattr(new_config, k, v)
-                        else:
-                            # Store extra fields in additional_info if possible
-                            if hasattr(new_config, "additional_info") and isinstance(
-                                new_config.additional_info, dict
-                            ):
-                                new_config.additional_info[k] = v
-                    saved_config = new_config
-                except Exception as e:
-                    print(
-                        f"Error recreating config: {e}. Proceeding with loaded config."
-                    )
-
-            probe = probe_cls(saved_config)
-
-            # Load the state dict (potentially strict=False if needed)
-            try:
-                probe.load_state_dict(data["state_dict"], strict=True)
-            except RuntimeError as e:
-                print(
-                    f"Warning: Error loading state_dict strictly for {probe.name}: {e}. Trying non-strict loading."
-                )
-                probe.load_state_dict(data["state_dict"], strict=False)
-
-            # Move probe to the final target device (config might specify one, load might specify another)
-            final_device = map_location  # Use the device specified for loading
-            probe.to(final_device)
-            # Update config device to reflect actual location
-            if hasattr(probe.config, "device"):
-                probe.config.device = str(final_device)
-
-            # Set the probe to evaluation mode
-            probe.eval()
-
-            return probe
-
-    # def save_json(self, path: str) -> None:
-    #     """Save probe's internal direction and metadata as JSON."""
-    #     if not path.endswith(".json"):
-    #         path += ".json"
-
-    #     save_dir = os.path.dirname(path)
-    #     if save_dir:
-    #         os.makedirs(save_dir, exist_ok=True)
-
-    #     # Get the internal representation (always in original activation space)
-    #     try:
-    #         vector = self._get_raw_direction_representation()
-    #         if vector is None:
-    #             raise ValueError("Raw direction representation is None.")
-    #         vector_np = vector.detach().clone().cpu().numpy()
-    #     except Exception as e:
-    #         print(
-    #             f"Error getting raw direction for {self.name}: {e}. Cannot save JSON."
-    #         )
-    #         return
 
     def save_json(self, path: str) -> None:
         """Save probe's internal direction and metadata as JSON."""
@@ -266,33 +132,21 @@ class BaseProbe(ABC, nn.Module, Generic[T]):
         if save_dir:
             os.makedirs(save_dir, exist_ok=True)
     
-        # Get the internal representation (always in original activation space)
         try:
             vector = self._get_raw_direction_representation()
-            print(f"[DEBUG save_json] Raw vector dtype: {vector.dtype if vector is not None else 'None'}")
-            print(f"[DEBUG save_json] Raw vector shape: {vector.shape if vector is not None else 'None'}")
-            
             if vector is None:
                 raise ValueError("Raw direction representation is None.")
             
-            # Convert to float32 before numpy conversion if bfloat16
             if vector.dtype == torch.bfloat16:
-                print(f"[DEBUG save_json] Converting from bfloat16 to float32 for JSON serialization")
                 vector = vector.to(torch.float32)
             
             vector_np = vector.detach().clone().cpu().numpy()
-            print(f"[DEBUG save_json] Numpy array dtype: {vector_np.dtype}")
         except Exception as e:
-            print(f"[DEBUG save_json] Exception type: {type(e)}")
-            print(f"[DEBUG save_json] Exception: {e}")
             print(f"Error getting raw direction for {self.name}: {e}. Cannot save JSON.")
             return
-        
 
-        # Prepare metadata using helper
         metadata = self._prepare_metadata(vector_np)
 
-        # Save as JSON
         save_data = {
             "vector": vector_np.tolist(),
             "metadata": metadata,
@@ -303,7 +157,6 @@ class BaseProbe(ABC, nn.Module, Generic[T]):
                 json.dump(save_data, f, indent=2)
         except TypeError as e:
             print(f"Error serializing probe data to JSON for {self.name}: {e}")
-            # Attempt to serialize with a fallback for non-serializable types
             try:
                 import numpy as np
 
@@ -312,8 +165,7 @@ class BaseProbe(ABC, nn.Module, Generic[T]):
                         return obj.tolist()
                     if isinstance(obj, torch.Tensor):
                         return obj.cpu().numpy().tolist()
-                    # Add more types if needed
-                    return str(obj)  # Fallback to string representation
+                    return str(obj)
 
                 with open(path, "w") as f:
                     json.dump(save_data, f, indent=2, default=default_serializer)
@@ -322,7 +174,6 @@ class BaseProbe(ABC, nn.Module, Generic[T]):
                 print(
                     f"Fallback JSON serialization also failed for {self.name}: {final_e}"
                 )
-
 
     def _prepare_metadata(self, vector_np: Any) -> dict:
         """Helper to prepare metadata dictionary for saving."""
@@ -343,108 +194,48 @@ class BaseProbe(ABC, nn.Module, Generic[T]):
             "device": _get_config_attr(self.config, "device"),
         }
     
-        # Add bias info if relevant
         bias_value = None
         has_bias_param = False
-        if hasattr(self, "linear") and isinstance(
-            self.linear, nn.Module
-        ):  # Check linear layer first
+        if hasattr(self, "linear") and isinstance(self.linear, nn.Module):
             if hasattr(self.linear, "bias") and self.linear.bias is not None:
                 bias_param = self.linear.bias
                 if isinstance(bias_param, torch.Tensor):
-                    # FIXED: Convert bfloat16 to float32 before numpy conversion
                     if bias_param.dtype == torch.bfloat16:
                         bias_param = bias_param.to(torch.float32)
                     bias_value = bias_param.data.detach().clone().cpu().numpy().tolist()
                     has_bias_param = True
-        elif (
-            hasattr(self, "intercept_") and self.intercept_ is not None
-        ):  # Check sklearn intercept
+        elif hasattr(self, "intercept_") and self.intercept_ is not None:
             intercept_param = self.intercept_
             if isinstance(intercept_param, torch.Tensor):
-                # FIXED: Convert bfloat16 to float32 before numpy conversion
                 if intercept_param.dtype == torch.bfloat16:
                     intercept_param = intercept_param.to(torch.float32)
-                bias_value = (
-                    intercept_param.data.detach().clone().cpu().numpy().tolist()
-                )
+                bias_value = intercept_param.data.detach().clone().cpu().numpy().tolist()
                 has_bias_param = True
     
         metadata["has_bias"] = has_bias_param
         if has_bias_param:
             metadata["bias"] = bias_value
-    
-        # ... rest of the method remains the same ...
 
-    
-    # def _prepare_metadata(self, vector_np: Any) -> dict:
-    #     """Helper to prepare metadata dictionary for saving."""
-    #     metadata = {
-    #         "model_name": _get_config_attr(self.config, "model_name", "unknown_model"),
-    #         "hook_point": _get_config_attr(self.config, "hook_point", "unknown_hook"),
-    #         "hook_layer": _get_config_attr(self.config, "hook_layer", 0),
-    #         "hook_head_index": _get_config_attr(self.config, "hook_head_index"),
-    #         "name": self.name,
-    #         "vector_dimension": (
-    #             vector_np.shape[-1] if hasattr(vector_np, "shape") else None
-    #         ),
-    #         "probe_type": self.__class__.__name__,
-    #         "dataset_path": _get_config_attr(self.config, "dataset_path"),
-    #         "prepend_bos": _get_config_attr(self.config, "prepend_bos", True),
-    #         "context_size": _get_config_attr(self.config, "context_size", 128),
-    #         "dtype": _get_config_attr(self.config, "dtype", "float32"),
-    #         "device": _get_config_attr(self.config, "device"),
-    #     }
-
-    #     # Add bias info if relevant
-    #     bias_value = None
-    #     has_bias_param = False
-    #     if hasattr(self, "linear") and isinstance(
-    #         self.linear, nn.Module
-    #     ):  # Check linear layer first
-    #         if hasattr(self.linear, "bias") and self.linear.bias is not None:
-    #             bias_param = self.linear.bias
-    #             if isinstance(bias_param, torch.Tensor):
-    #                 bias_value = bias_param.data.detach().clone().cpu().numpy().tolist()
-    #                 has_bias_param = True
-    #     elif (
-    #         hasattr(self, "intercept_") and self.intercept_ is not None
-    #     ):  # Check sklearn intercept
-    #         intercept_param = self.intercept_
-    #         if isinstance(intercept_param, torch.Tensor):
-    #             bias_value = (
-    #                 intercept_param.data.detach().clone().cpu().numpy().tolist()
-    #             )
-    #             has_bias_param = True
-
-    #     metadata["has_bias"] = has_bias_param
-    #     if has_bias_param:
-    #         metadata["bias"] = bias_value
-
-        # Save relevant config flags needed for reconstruction
         config_flags_to_save = [
             "normalize_weights",
             "bias",
-            "loss_type",  # Linear/Logistic
+            "loss_type",
             "n_clusters",
             "n_init",
-            "random_state",  # KMeans
-            "n_components",  # PCA
+            "random_state",
+            "n_components",
             "standardize",
             "max_iter",
-            "solver",  # SklearnLogistic
+            "solver",
         ]
         for flag in config_flags_to_save:
             if hasattr(self.config, flag):
-                metadata_key = (
-                    "bias_config" if flag == "bias" else flag
-                )  # Map 'bias' config attr to 'bias_config' metadata key
+                metadata_key = "bias_config" if flag == "bias" else flag
                 metadata[metadata_key] = _get_config_attr(self.config, flag)
 
-        # Add any other info from config.additional_info
         additional_info = _get_config_attr(self.config, "additional_info", {})
         if isinstance(additional_info, dict):
-            metadata.update(additional_info)  # Merge additional info
+            metadata.update(additional_info)
 
         return metadata
 
@@ -465,13 +256,11 @@ class BaseProbe(ABC, nn.Module, Generic[T]):
         with open(path, "r") as f:
             data = json.load(f)
 
-        # Extract data
         vector_list = data.get("vector")
         metadata = data.get("metadata", {})
         if vector_list is None:
             raise ValueError(f"JSON file {path} missing 'vector' field.")
 
-        # Determine device
         target_device_str = (
             device
             or metadata.get("device")
@@ -479,17 +268,13 @@ class BaseProbe(ABC, nn.Module, Generic[T]):
         )
         target_device = torch.device(target_device_str)
 
-        # Get probe type and dynamically load classes
         probe_type_name = metadata.get("probe_type", cls.__name__)
         probe_cls = cls._get_probe_class_by_name(probe_type_name)
         config_cls = cls._get_config_class_for_probe(probe_cls, probe_type_name)
 
-        # Instantiate config
         dim = metadata.get("vector_dimension")
         if dim is None:
-            # Attempt to infer dim from vector if not in metadata
             try:
-                # Need to convert to tensor first to get shape
                 temp_vector = torch.tensor(vector_list)
                 dim = temp_vector.shape[-1]
                 print(
@@ -500,7 +285,6 @@ class BaseProbe(ABC, nn.Module, Generic[T]):
                     f"Could not determine vector dimension from metadata or vector in {path}: {e}"
                 )
 
-        # Create config instance, ensuring mandatory fields are present
         try:
             config = config_cls(input_size=dim)
         except TypeError as e:
@@ -508,14 +292,11 @@ class BaseProbe(ABC, nn.Module, Generic[T]):
                 f"Error instantiating config class {config_cls.__name__} with input_size={dim}. Is it the correct config class for {probe_type_name}? Error: {e}"
             )
 
-        # Update config with metadata fields using helper
         cls._update_config_from_metadata(config, metadata, target_device_str)
 
-        # Create the probe instance with the configured settings
         probe = probe_cls(config)
-        probe.to(target_device)  # Move to target device early
+        probe.to(target_device)
 
-        # Convert vector list to tensor and set representation
         try:
             vector_tensor = torch.tensor(vector_list, dtype=probe.dtype).to(
                 target_device
@@ -524,10 +305,8 @@ class BaseProbe(ABC, nn.Module, Generic[T]):
         except Exception as e:
             raise ValueError(f"Error processing 'vector' data from {path}: {e}")
 
-        # Restore bias/intercept if it exists in metadata
         cls._restore_bias_intercept(probe, metadata, target_device)
 
-        # Set to evaluation mode
         probe.eval()
 
         return probe
@@ -536,23 +315,17 @@ class BaseProbe(ABC, nn.Module, Generic[T]):
     def _get_probe_class_by_name(cls, probe_type_name: str) -> type["BaseProbe"]:
         """Dynamically imports and returns the probe class."""
         try:
-            # Heuristic: module name is lowercase probe type name without 'probe'
             module_name_part = probe_type_name.lower().replace("probe", "")
-            if not module_name_part:  # Handle case like 'Probe' -> ''
+            if not module_name_part:
                 raise ImportError("Could not determine module name part.")
-            # Special case mapping
             if "sklearn" in module_name_part:
                 module_name_part = "sklearn_logistic"
             elif module_name_part == "linear":
                 module_name_part = "linear"
-            elif (
-                module_name_part == "logistic"
-                or module_name_part == "multiclasslogistic"
-            ):
+            elif module_name_part == "logistic" or module_name_part == "multiclasslogistic":
                 module_name_part = "logistic"
             elif module_name_part in ["kmeans", "pca", "meandifference", "directional"]:
                 module_name_part = "directional"
-            # Add more specific mappings if needed
 
             package_name = "probity.probes"
             module_full_name = f"{package_name}.{module_name_part}"
@@ -568,7 +341,6 @@ class BaseProbe(ABC, nn.Module, Generic[T]):
             print(
                 f"Warning: Could not dynamically load probe class {probe_type_name} from module {module_full_name if 'module_full_name' in locals() else 'unknown'}. Error: {e}. Falling back to {cls.__name__}."
             )
-            # Ensure the fallback class is actually a BaseProbe subclass
             if issubclass(cls, BaseProbe):
                 return cls
             else:
@@ -582,7 +354,6 @@ class BaseProbe(ABC, nn.Module, Generic[T]):
     ) -> type["ProbeConfig"]:
         """Finds the corresponding config class for a given probe class."""
         config_cls = None
-        # 1. Try direct name convention
         config_cls_name = f"{probe_type_name}Config"
         try:
             config_module = importlib.import_module(".config", package="probity.probes")
@@ -590,20 +361,15 @@ class BaseProbe(ABC, nn.Module, Generic[T]):
             if issubclass(config_cls, ProbeConfig):
                 return config_cls
         except (ImportError, AttributeError):
-            pass  # Continue trying other methods
+            pass
 
-        # 2. Try inferring from probe class Generic hint
         try:
-            # Iterate through original bases to find the BaseProbe generic definition
             for base in getattr(probe_cls, "__orig_bases__", []):
                 if get_origin(base) is BaseProbe:
                     config_arg = get_args(base)[0]
-                    # Resolve forward references if necessary
                     if isinstance(config_arg, TypeVar):
-                        # This might be harder to resolve robustly here
                         pass
                     elif isinstance(config_arg, str):
-                        # Attempt to evaluate the forward reference string
                         try:
                             config_module = importlib.import_module(
                                 ".config", package="probity.probes"
@@ -612,7 +378,7 @@ class BaseProbe(ABC, nn.Module, Generic[T]):
                                 config_arg, globals(), config_module.__dict__
                             )
                         except NameError:
-                            pass  # Could not resolve forward ref
+                            pass
                     elif isinstance(config_arg, type) and issubclass(
                         config_arg, ProbeConfig
                     ):
@@ -620,13 +386,12 @@ class BaseProbe(ABC, nn.Module, Generic[T]):
 
                     if config_cls and issubclass(config_cls, ProbeConfig):
                         return config_cls
-                    break  # Found BaseProbe base, stop searching bases
+                    break
         except Exception as e:
             print(
                 f"Warning: Exception while inferring config type from Generic hint for {probe_type_name}: {e}"
             )
 
-        # 3. Fallback to base ProbeConfig
         print(
             f"Warning: Could not determine specific config class for {probe_type_name}. Using base ProbeConfig."
         )
@@ -643,7 +408,6 @@ class BaseProbe(ABC, nn.Module, Generic[T]):
         cls, config: "ProbeConfig", metadata: dict, target_device_str: str
     ) -> None:
         """Populates the config object with values from the metadata dict."""
-        # Update common fields
         common_fields = [
             "model_name",
             "hook_point",
@@ -659,11 +423,8 @@ class BaseProbe(ABC, nn.Module, Generic[T]):
             if key in metadata:
                 _set_config_attr(config, key, metadata[key])
 
-        # Set device separately
         _set_config_attr(config, "device", target_device_str)
 
-        # Update probe-specific config fields from metadata
-        # Use all remaining metadata keys, mapping 'bias_config' back to 'bias'
         specific_metadata_keys = (
             set(metadata.keys())
             - set(common_fields)
@@ -674,14 +435,10 @@ class BaseProbe(ABC, nn.Module, Generic[T]):
             config_key = "bias" if key == "bias_config" else key
             _set_config_attr(config, config_key, metadata[key])
 
-        # Ensure additional_info exists if needed
         if not hasattr(config, "additional_info") or config.additional_info is None:
-            if isinstance(
-                config, ProbeConfig
-            ):  # Check if it's a base ProbeConfig or subclass
+            if isinstance(config, ProbeConfig):
                 config.additional_info = {}
 
-        # Put known bias info into additional_info for consistency (optional)
         if (
             "has_bias" in metadata
             and hasattr(config, "additional_info")
@@ -713,7 +470,6 @@ class BaseProbe(ABC, nn.Module, Generic[T]):
                 return
 
             restored = False
-            # Try restoring to linear layer bias first
             if (
                 hasattr(probe, "linear")
                 and isinstance(probe.linear, nn.Module)
@@ -722,7 +478,6 @@ class BaseProbe(ABC, nn.Module, Generic[T]):
                 if probe.linear.bias is not None:
                     with torch.no_grad():
                         try:
-                            # Ensure shapes match or attempt reshape
                             if tensor_data.shape == probe.linear.bias.shape:
                                 probe.linear.bias.copy_(tensor_data)
                                 restored = True
@@ -743,17 +498,14 @@ class BaseProbe(ABC, nn.Module, Generic[T]):
                         f"Warning: Bias metadata found for {probe.name}, but probe.linear.bias is None."
                     )
 
-            # If not restored, try restoring to intercept_ buffer (for SklearnLogisticProbe)
             if not restored and hasattr(probe, "intercept_"):
                 with torch.no_grad():
                     try:
                         if probe.intercept_ is not None:
-                            # Check shape before copying
                             if tensor_data.shape == probe.intercept_.shape:
                                 probe.intercept_.copy_(tensor_data)
                                 restored = True
                             else:
-                                # Handle potential shape mismatch for intercept (e.g., [1] vs [])
                                 print(
                                     f"Warning: Intercept shape mismatch. Metadata: {tensor_data.shape}, Probe: {probe.intercept_.shape}. Attempting reshape."
                                 )
@@ -762,11 +514,9 @@ class BaseProbe(ABC, nn.Module, Generic[T]):
                                 )
                                 restored = True
                         else:
-                            # Intercept buffer might not exist yet, create it
                             print(
                                 f"Warning: Intercept buffer 'intercept_' was None for {probe.name}. Creating buffer from metadata."
                             )
-                            # setattr directly might not work for buffers, use register_buffer
                             probe.register_buffer("intercept_", tensor_data.clone())
                             restored = True
                     except Exception as e:
