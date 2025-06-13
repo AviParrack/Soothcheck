@@ -290,3 +290,169 @@ def process_token_data(token_details: List[Dict], output_dir: Path = Path("./out
     save_token_scores_csv(token_details, csv_path)
     
     print(f"Processing complete. Files saved to: {output_dir}")
+
+
+
+def generate_delta_visualization(delta_details: List[Dict], output_path: Path) -> None:
+    """Generate HTML visualization of token-level score deltas between truth and lie versions."""
+    
+    html_template = """
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Truth vs Lie Token Score Deltas</title>
+        <style>
+            body {
+                font-family: Arial, sans-serif;
+                margin: 0;
+                padding: 20px;
+                background-color: #f5f5f5;
+            }
+            .header {
+                text-align: center;
+                margin-bottom: 30px;
+                padding: 20px;
+                background-color: white;
+                border-radius: 10px;
+                box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+            }
+            .legend {
+                display: flex;
+                justify-content: center;
+                align-items: center;
+                margin: 20px 0;
+                gap: 20px;
+            }
+            .legend-item {
+                display: flex;
+                align-items: center;
+                gap: 5px;
+            }
+            .legend-color {
+                width: 20px;
+                height: 20px;
+                border-radius: 3px;
+            }
+            .example-container {
+                margin: 20px 0;
+                padding: 20px;
+                background-color: white;
+                border-radius: 10px;
+                box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+            }
+            .token-text {
+                line-height: 2;
+                margin-bottom: 15px;
+                font-size: 16px;
+            }
+            .token {
+                display: inline-block;
+                padding: 3px 6px;
+                margin: 1px;
+                border-radius: 4px;
+                font-family: 'Courier New', monospace;
+                font-size: 14px;
+                border: 1px solid #ddd;
+                cursor: help;
+                white-space: pre-wrap;
+            }
+            .metadata {
+                font-size: 14px;
+                color: #666;
+                margin-top: 15px;
+                padding-top: 15px;
+                border-top: 1px solid #eee;
+            }
+        </style>
+    </head>
+    <body>
+        <div class="header">
+            <h1>Truth vs Lie Token Score Deltas</h1>
+            <p>Red = Higher score in lie version, Blue = Higher score in truth version</p>
+            <div class="legend">
+                <div class="legend-item">
+                    <div class="legend-color" style="background-color: rgba(255, 0, 0, 1);"></div>
+                    <span>Higher in Lie Version (+)</span>
+                </div>
+                <div class="legend-item">
+                    <div class="legend-color" style="background-color: rgba(128, 128, 128, 0.2);"></div>
+                    <span>No Difference (0)</span>
+                </div>
+                <div class="legend-item">
+                    <div class="legend-color" style="background-color: rgba(0, 0, 255, 1);"></div>
+                    <span>Higher in Truth Version (-)</span>
+                </div>
+            </div>
+        </div>
+        
+        {% for example in examples %}
+        <div class="example-container">
+            <h3>Example {{ example.id }}: {{ example.lie_statement }}</h3>
+            <div class="token-text">
+                {% for token, truth_score, lie_score, delta, color in example.tokens_with_deltas %}
+                <span class="token" style="background-color: {{ color }}" 
+                      title="Truth: {{ "%.4f"|format(truth_score) }}&#10;Lie: {{ "%.4f"|format(lie_score) }}&#10;Delta: {{ "%.4f"|format(delta) }}">{{ token }}</span>
+                {% endfor %}
+            </div>
+            <div class="metadata">
+                <div><strong>Mean Delta:</strong> {{ "%.4f"|format(example.mean_delta) }}</div>
+                <div><strong>Max Delta:</strong> {{ "%.4f"|format(example.max_delta) }}</div>
+                <div><strong>Min Delta:</strong> {{ "%.4f"|format(example.min_delta) }}</div>
+            </div>
+        </div>
+        {% endfor %}
+    </body>
+    </html>
+    """
+    
+    # Prepare data for template
+    examples = []
+    
+    # Normalize deltas globally for consistent coloring
+    all_deltas = [delta for detail in delta_details for delta in detail['score_deltas']]
+    if all_deltas:
+        max_abs_delta = max(abs(d) for d in all_deltas)
+        
+        for detail in delta_details:
+            clean_tokens = [token.replace('Ġ', ' ').replace('Ċ', '\n') for token in detail['tokens']]
+            
+            tokens_with_deltas = []
+            for token, truth_score, lie_score, delta in zip(
+                clean_tokens, 
+                detail['truth_scores'], 
+                detail['lie_scores'],
+                detail['score_deltas']
+            ):
+                # Color based on delta: red for positive (higher in lie), blue for negative (higher in truth)
+                if max_abs_delta > 0:
+                    intensity = abs(delta) / max_abs_delta
+                    if delta > 0:
+                        color = f"rgba(255, 0, 0, {intensity:.3f})"  # Red for lie > truth
+                    elif delta < 0:
+                        color = f"rgba(0, 0, 255, {abs(intensity):.3f})"  # Blue for truth > lie
+                    else:
+                        color = "rgba(128, 128, 128, 0.1)"  # Gray for no difference
+                else:
+                    color = "rgba(128, 128, 128, 0.1)"
+                
+                tokens_with_deltas.append((token, truth_score, lie_score, delta, color))
+            
+            examples.append({
+                'id': detail['id'],
+                'lie_statement': detail['lie_statement'],
+                'tokens_with_deltas': tokens_with_deltas,
+                'mean_delta': detail['mean_delta'],
+                'max_delta': detail['max_delta'],
+                'min_delta': detail['min_delta']
+            })
+    
+    # Render template
+    from jinja2 import Template
+    template = Template(html_template)
+    html_content = template.render(examples=examples)
+    
+    # Save HTML file
+    with open(output_path, 'w', encoding='utf-8') as f:
+        f.write(html_content)
+    
+    print(f"Delta visualization saved to: {output_path}")
