@@ -165,6 +165,97 @@ def analyze_statement_deltas(truth_details: Dict, lie_details: Dict,
     
     return None
 
+
+class MemoryEfficientProbeInference:
+    """Memory efficient probe inference using shared model"""
+    def __init__(self, model, hook_point, probe, device):
+        self.model = model
+        self.hook_point = hook_point
+        self.probe = probe.to(device)
+        self.device = device
+        self.probe.eval()
+    
+    def get_activations_for_text(self, text: str) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Get activations and tokens for a single text"""
+        if hasattr(self.model, 'tokenizer'):
+            tokenizer = self.model.tokenizer
+        else:
+            from transformers import AutoTokenizer
+            tokenizer = AutoTokenizer.from_pretrained(self.model.cfg.model_name)
+        
+        tokens = tokenizer.encode(text, return_tensors="pt").to(self.device)
+        
+        with torch.no_grad():
+            _, cache = self.model.run_with_cache(
+                tokens,
+                names_filter=[self.hook_point],
+                return_cache_object=True
+            )
+            act = cache[self.hook_point]
+            if hasattr(self.probe, 'dtype'):
+                act = act.to(self.probe.dtype)
+            return act, tokens[0]
+    
+    def get_token_scores_raw(self, texts: List[str]) -> List[Dict[str, Any]]:
+        """Get raw (unnormalized) token-level scores for texts"""
+        token_details = []
+        
+        for text in texts:
+            # Get activations and tokens
+            activations, tokens = self.get_activations_for_text(text)
+            token_texts = self.model.tokenizer.convert_ids_to_tokens(tokens)
+            
+            with torch.no_grad():
+                token_scores = []
+                for i in range(activations.shape[1]):
+                    token_act = activations[:, i, :]
+                    score = self.probe(token_act.to(self.device))
+                    
+                    # Apply sigmoid only to LogisticProbe
+                    if self.probe.__class__.__name__ == 'LogisticProbe':
+                        score = torch.sigmoid(score)
+                    
+                    token_scores.append(score.cpu().item())
+            
+            token_detail = {
+                "text": text,
+                "tokens": token_texts,
+                "token_scores": token_scores,
+                "mean_score": float(np.mean(token_scores)),
+                "max_score": float(np.max(token_scores)),
+                "min_score": float(np.min(token_scores))
+            }
+            token_details.append(token_detail)
+        
+        return token_details
+
+    def get_scores_raw(self, texts: List[str]) -> np.ndarray:
+        """Get raw (unnormalized) mean probe scores for texts"""
+        scores = []
+        
+        for text in texts:
+            act, _ = self.get_activations_for_text(text)
+            
+            with torch.no_grad():
+                mean_act = act.mean(dim=1)
+                score = self.probe(mean_act.to(self.device))
+                
+                # Apply sigmoid only to LogisticProbe
+                if self.probe.__class__.__name__ == 'LogisticProbe':
+                    score = torch.sigmoid(score)
+
+                if score.dim() > 0:
+                    score = score.to(torch.float32)
+                    score_value = score.squeeze().cpu().numpy().item()
+                else:
+                    score = score.to(torch.float32)
+                    score_value = score.cpu().numpy().item()
+                
+                scores.append(score_value)
+        
+        return np.array(scores)
+
+
 def analyze_2t1l_loss(statements_info: Dict, lie_statement: str, 
                      inference: MemoryEfficientProbeInference, full_text: str) -> Optional[Dict]:
     """Analyze 2T1L loss using mean score per statement"""
@@ -293,95 +384,6 @@ def evaluate_2t1l_dataset(dataset_path: str, inference: MemoryEfficientProbeInfe
         })
     
     return result
-
-class MemoryEfficientProbeInference:
-    """Memory efficient probe inference using shared model"""
-    def __init__(self, model, hook_point, probe, device):
-        self.model = model
-        self.hook_point = hook_point
-        self.probe = probe.to(device)
-        self.device = device
-        self.probe.eval()
-    
-    def get_activations_for_text(self, text: str) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Get activations and tokens for a single text"""
-        if hasattr(self.model, 'tokenizer'):
-            tokenizer = self.model.tokenizer
-        else:
-            from transformers import AutoTokenizer
-            tokenizer = AutoTokenizer.from_pretrained(self.model.cfg.model_name)
-        
-        tokens = tokenizer.encode(text, return_tensors="pt").to(self.device)
-        
-        with torch.no_grad():
-            _, cache = self.model.run_with_cache(
-                tokens,
-                names_filter=[self.hook_point],
-                return_cache_object=True
-            )
-            act = cache[self.hook_point]
-            if hasattr(self.probe, 'dtype'):
-                act = act.to(self.probe.dtype)
-            return act, tokens[0]
-    
-    def get_token_scores_raw(self, texts: List[str]) -> List[Dict[str, Any]]:
-        """Get raw (unnormalized) token-level scores for texts"""
-        token_details = []
-        
-        for text in texts:
-            # Get activations and tokens
-            activations, tokens = self.get_activations_for_text(text)
-            token_texts = self.model.tokenizer.convert_ids_to_tokens(tokens)
-            
-            with torch.no_grad():
-                token_scores = []
-                for i in range(activations.shape[1]):
-                    token_act = activations[:, i, :]
-                    score = self.probe(token_act.to(self.device))
-                    
-                    # Apply sigmoid only to LogisticProbe
-                    if self.probe.__class__.__name__ == 'LogisticProbe':
-                        score = torch.sigmoid(score)
-                    
-                    token_scores.append(score.cpu().item())
-            
-            token_detail = {
-                "text": text,
-                "tokens": token_texts,
-                "token_scores": token_scores,
-                "mean_score": float(np.mean(token_scores)),
-                "max_score": float(np.max(token_scores)),
-                "min_score": float(np.min(token_scores))
-            }
-            token_details.append(token_detail)
-        
-        return token_details
-
-    def get_scores_raw(self, texts: List[str]) -> np.ndarray:
-        """Get raw (unnormalized) mean probe scores for texts"""
-        scores = []
-        
-        for text in texts:
-            act, _ = self.get_activations_for_text(text)
-            
-            with torch.no_grad():
-                mean_act = act.mean(dim=1)
-                score = self.probe(mean_act.to(self.device))
-                
-                # Apply sigmoid only to LogisticProbe
-                if self.probe.__class__.__name__ == 'LogisticProbe':
-                    score = torch.sigmoid(score)
-
-                if score.dim() > 0:
-                    score = score.to(torch.float32)
-                    score_value = score.squeeze().cpu().numpy().item()
-                else:
-                    score = score.to(torch.float32)
-                    score_value = score.cpu().numpy().item()
-                
-                scores.append(score_value)
-        
-        return np.array(scores)
 
 def normalize_to_01(scores: List[float]) -> List[float]:
     """Normalize scores to [0, 1] range"""
@@ -517,11 +519,12 @@ def evaluate_probe(inference: MemoryEfficientProbeInference, texts: List[str],
     
     # NEW: Combined 2T1L analysis
     ttol_and_delta_results = None
-    if dataset_path and 'two_truths_one_lie' in dataset_path:
-        try:
-            ttol_and_delta_results = evaluate_2t1l_dataset(dataset_path, inference, texts, labels)
-        except Exception as e:
-            print(f"Warning: Could not perform 2T1L analysis: {e}")
+    print(dataset_path)
+    # if dataset_path and 'two_truths_one_lie' in dataset_path:
+    try:
+        ttol_and_delta_results = evaluate_2t1l_dataset(dataset_path, inference, texts, labels)
+    except Exception as e:
+        print(f"Warning: Could not perform 2T1L analysis: {e}")
     
     return {
         'metrics': metrics,
@@ -536,6 +539,10 @@ def evaluate_probe(inference: MemoryEfficientProbeInference, texts: List[str],
 def create_probe_type_plots(probe_results: Dict, save_dir: Path, probe_type: str):
     """Create plots for a specific probe type."""
     layers = sorted(probe_results.keys())
+
+    if not layers:
+        print(f"No layers found for {probe_type}, skipping plots...")
+    return
     
     # Plot metrics across layers
     plt.figure(figsize=(10, 6))
@@ -644,6 +651,10 @@ def create_performance_plots(results: Dict, save_dir: Path):
     """Create performance visualization plots"""
     probe_types = list(next(iter(results.values())).keys())
     layers = sorted(results.keys())
+
+    if not layers:
+        print(f"No layers found for {probe_type}, skipping plots...")
+    return
     
     # Create AUROC heatmap with larger dimensions
     plt.figure(figsize=(max(16, len(layers) * 0.8), max(10, len(probe_types) * 1.2)))
@@ -815,6 +826,9 @@ def main():
     for probe_type_dir in probe_dir.iterdir():
         if not probe_type_dir.is_dir():
             continue
+
+        if probe_type_dir.name.startswith('.') or probe_type_dir.name in ['__pycache__', '.ipynb_checkpoints']:
+            continue
         
         probe_type = probe_type_dir.name
         print(f"\nEvaluating {probe_type} probes")
@@ -824,6 +838,10 @@ def main():
         
         # Find all layer probe files
         probe_files = sorted(probe_type_dir.glob("layer_*_probe.json"))
+
+        if not probe_files:
+            print(f"No probe files found in {probe_type_dir}, skipping...")
+            continue
         
         for probe_file in tqdm(probe_files, desc=f"{probe_type} probes"):
             # Extract layer number
