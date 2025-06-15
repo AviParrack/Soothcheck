@@ -137,7 +137,7 @@ def analyze_2t1l_from_saved_scores(statements_info: Dict, lie_statement: str,
     
     for i, stmt in enumerate(statements_info['statements']):
         mean_score = np.mean(stmt['scores'])
-        statement_mean_scores.append(mean_score)
+        statement_mean_scores.append(float(mean_score))
         statement_texts.append(stmt['text'])
         
         # Convert to logits based on probe type
@@ -149,7 +149,7 @@ def analyze_2t1l_from_saved_scores(statements_info: Dict, lie_statement: str,
             # For other probes, use raw scores as logits
             logit = mean_score
         
-        statement_logits.append(logit)
+        statement_logits.append(float(logit))
     
     # Apply softmax to get probability distribution
     logits_tensor = torch.tensor(statement_logits, dtype=torch.float32)
@@ -172,13 +172,13 @@ def analyze_2t1l_from_saved_scores(statements_info: Dict, lie_statement: str,
         'statements': statement_texts,
         'statement_mean_scores': statement_mean_scores,
         'statement_logits': statement_logits,
-        'statement_probs': probs.tolist(),
-        'lie_statement_idx': lie_claim_idx,
-        'predicted_lie_idx': predicted_lie_idx,
-        'ttol_loss': normalized_loss.item(),
-        'correct_prediction': predicted_lie_idx == lie_claim_idx,
-        'confidence': probs[predicted_lie_idx].item(),
-        'cross_entropy_loss': cross_entropy_loss.item()
+        'statement_probs': [float(x) for x in probs.tolist()],
+        'lie_statement_idx': int(lie_claim_idx),
+        'predicted_lie_idx': int(predicted_lie_idx),
+        'ttol_loss': float(normalized_loss.item()),
+        'correct_prediction': bool(predicted_lie_idx == lie_claim_idx),
+        'confidence': float(probs[predicted_lie_idx].item()),
+        'cross_entropy_loss': float(cross_entropy_loss.item())
     }
 
 def analyze_2t1l_random_baseline(statements_info: Dict, lie_statement: str) -> Optional[Dict]:
@@ -210,14 +210,14 @@ def analyze_2t1l_random_baseline(statements_info: Dict, lie_statement: str) -> O
     
     return {
         'method': 'random_baseline',
-        'random_logits': random_logits,
-        'statement_probs': probs.tolist(),
-        'lie_statement_idx': lie_claim_idx,
-        'predicted_lie_idx': predicted_lie_idx,
-        'ttol_loss': normalized_loss.item(),
-        'correct_prediction': predicted_lie_idx == lie_claim_idx,
-        'confidence': probs[predicted_lie_idx].item(),
-        'cross_entropy_loss': cross_entropy_loss.item()
+        'random_logits': [float(x) for x in random_logits],
+        'statement_probs': [float(x) for x in probs.tolist()],
+        'lie_statement_idx': int(lie_claim_idx),
+        'predicted_lie_idx': int(predicted_lie_idx),
+        'ttol_loss': float(normalized_loss.item()),
+        'correct_prediction': bool(predicted_lie_idx == lie_claim_idx),
+        'confidence': float(probs[predicted_lie_idx].item()),
+        'cross_entropy_loss': float(cross_entropy_loss.item())
     }
 
 def extract_assistant_response_from_chat(full_chat_text: str) -> Optional[str]:
@@ -271,8 +271,8 @@ def analyze_statement_deltas(truth_statements_info: Dict, lie_statements_info: D
         delta = lie_mean - truth_mean
         
         statement_deltas.append({
-            'statement_idx': i,
-            'is_lie_statement': i == lie_statement_idx,
+            'statement_idx': int(i),
+            'is_lie_statement': bool(i == lie_statement_idx),
             'truth_mean_score': float(truth_mean),
             'lie_mean_score': float(lie_mean),
             'delta': float(delta),
@@ -284,13 +284,13 @@ def analyze_statement_deltas(truth_statements_info: Dict, lie_statements_info: D
     truth_stmt_deltas = [s['delta'] for s in statement_deltas if not s['is_lie_statement']]
     
     return {
-        'lie_statement_idx': lie_statement_idx,
-        'lie_statement_delta': lie_stmt_delta,
-        'truth_statements_deltas': truth_stmt_deltas,
+        'lie_statement_idx': int(lie_statement_idx),
+        'lie_statement_delta': float(lie_stmt_delta),
+        'truth_statements_deltas': [float(x) for x in truth_stmt_deltas],
         'avg_truth_statements_delta': float(np.mean(truth_stmt_deltas)),
         'statement_deltas': statement_deltas,
-        'delta_separation': lie_stmt_delta - np.mean(truth_stmt_deltas),  # How much higher lie statement delta is
-        'good_separation': lie_stmt_delta > np.mean(truth_stmt_deltas)  # True if lie statement has higher delta
+        'delta_separation': float(lie_stmt_delta - np.mean(truth_stmt_deltas)),  # How much higher lie statement delta is
+        'good_separation': bool(lie_stmt_delta > np.mean(truth_stmt_deltas))  # True if lie statement has higher delta
     }
 
 def calculate_delta_statistics(ttol_results: List[Dict]) -> Dict:
