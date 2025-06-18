@@ -7,7 +7,7 @@ from typing import List, Dict, Optional
 
 def extract_three_statements_from_tokens(tokens: List[str], token_scores: List[float], 
                                         text: str, lie_statement: str) -> Optional[Dict]:
-    """Extract three statements using token-level data directly"""
+    """Extract three statements using token-level data with proper sentence-to-token mapping"""
     
     try:
         assistant_start_idx = None
@@ -35,7 +35,25 @@ def extract_three_statements_from_tokens(tokens: List[str], token_scores: List[f
         response_tokens = tokens[assistant_start_idx:assistant_end_idx]
         response_scores = token_scores[assistant_start_idx:assistant_end_idx]
         
-        # Convert tokens back to readable text for sentence splitting
+        # Create character-to-token mapping by reconstructing text step by step
+        char_to_token = {}
+        current_char_pos = 0
+        
+        for token_idx, token in enumerate(response_tokens):
+            # Convert token to its text representation
+            if token.startswith("Ġ"):  # Llama space prefix
+                token_text = " " + token[1:]
+            elif token in ["\u010a", "Ċ"]:  # Newline tokens
+                token_text = "\n"
+            else:
+                token_text = token
+            
+            # Map each character position to this token
+            for _ in range(len(token_text)):
+                char_to_token[current_char_pos] = token_idx
+                current_char_pos += 1
+        
+        # Reconstruct the full response text
         response_text = ""
         for token in response_tokens:
             if token.startswith("Ġ"):  # Llama space prefix
@@ -47,42 +65,107 @@ def extract_three_statements_from_tokens(tokens: List[str], token_scores: List[f
         
         response_text = response_text.strip()
         
-        # Simple sentence splitting by periods
-        sentences = []
-        current_start = 0
-        
+        # Find sentence boundaries by looking for periods followed by space or newline
+        sentence_boundaries = []
         for i, char in enumerate(response_text):
-            if char == '.' and i < len(response_text) - 1:
-                sentence = response_text[current_start:i+1].strip()
-                if len(sentence.split()) > 3:  # Only substantial sentences
-                    sentences.append(sentence)
-                current_start = i + 1
+            if char == '.' and (i == len(response_text) - 1 or 
+                               response_text[i + 1] in [' ', '\n', '\t']):
+                sentence_boundaries.append(i + 1)  # Include the period
         
-        # Add remaining text as last sentence
-        remaining = response_text[current_start:].strip()
-        if remaining and len(remaining.split()) > 3:
-            sentences.append(remaining)
+        # If we don't have enough sentence boundaries, split differently
+        if len(sentence_boundaries) < 2:
+            # Fallback: split by newlines or roughly into thirds
+            newline_positions = [i for i, char in enumerate(response_text) if char == '\n']
+            if len(newline_positions) >= 2:
+                sentence_boundaries = newline_positions[:2] + [len(response_text)]
+            else:
+                # Last resort: split into thirds
+                third = len(response_text) // 3
+                sentence_boundaries = [third, 2 * third, len(response_text)]
         
+        # Extract sentences based on boundaries
+        sentences = []
+        sentence_token_ranges = []
+        
+        start_char = 0
+        for boundary in sentence_boundaries[:3]:  # Only take first 3 boundaries
+            # Get the sentence text
+            sentence_text = response_text[start_char:boundary].strip()
+            
+            if len(sentence_text.split()) > 2:  # Only substantial sentences
+                # Map character positions to token indices
+                start_token_idx = char_to_token.get(start_char, 0)
+                end_char = min(boundary - 1, len(response_text) - 1)
+                end_token_idx = char_to_token.get(end_char, len(response_tokens) - 1)
+                
+                # Ensure we have a valid range
+                if end_token_idx < start_token_idx:
+                    end_token_idx = start_token_idx
+                
+                sentences.append(sentence_text)
+                sentence_token_ranges.append((start_token_idx, end_token_idx + 1))  # +1 for exclusive end
+            
+            start_char = boundary
+            
+            # If we have 3 sentences, stop
+            if len(sentences) >= 3:
+                break
+        
+        # If we still don't have 3 sentences, fall back to equal division
         if len(sentences) < 3:
-            return None
+            print(f"Warning: Only found {len(sentences)} sentences, falling back to equal division")
+            
+            # Simple sentence splitting by periods (fallback)
+            sentences = []
+            current_start = 0
+            
+            for i, char in enumerate(response_text):
+                if char == '.' and i < len(response_text) - 1:
+                    sentence = response_text[current_start:i+1].strip()
+                    if len(sentence.split()) > 3:  # Only substantial sentences
+                        sentences.append(sentence)
+                    current_start = i + 1
+            
+            # Add remaining text as last sentence
+            remaining = response_text[current_start:].strip()
+            if remaining and len(remaining.split()) > 3:
+                sentences.append(remaining)
+            
+            if len(sentences) < 3:
+                return None
+            
+            # Take first 3 sentences and divide tokens equally
+            three_sentences = sentences[:3]
+            tokens_per_sentence = len(response_tokens) // 3
+            
+            sentence_token_ranges = []
+            for i in range(3):
+                start_idx = i * tokens_per_sentence
+                end_idx = min((i + 1) * tokens_per_sentence, len(response_tokens)) if i < 2 else len(response_tokens)
+                sentence_token_ranges.append((start_idx, end_idx))
+            
+            sentences = three_sentences
         
-        # Take first 3 sentences
-        three_sentences = sentences[:3]
-        
-        # Map sentences to token ranges (approximate)
+        # Build final statements with proper token alignment
         statements = []
-        tokens_per_sentence = len(response_tokens) // 3  # Rough estimate
-        
-        for i, sentence in enumerate(three_sentences):
-            start_idx = i * tokens_per_sentence
-            end_idx = min((i + 1) * tokens_per_sentence, len(response_tokens)) if i < 2 else len(response_tokens)
+        for i, (sentence_text, (start_token_idx, end_token_idx)) in enumerate(zip(sentences[:3], sentence_token_ranges[:3])):
+            # Ensure indices are within bounds
+            start_token_idx = max(0, min(start_token_idx, len(response_tokens) - 1))
+            end_token_idx = max(start_token_idx + 1, min(end_token_idx, len(response_tokens)))
+            
+            stmt_tokens = response_tokens[start_token_idx:end_token_idx]
+            stmt_scores = response_scores[start_token_idx:end_token_idx]
+            
+            # print(f"Sentence {i}: '{sentence_text}'")
+            # print(f"  Tokens ({start_token_idx}-{end_token_idx}): {stmt_tokens}")
+            # print(f"  Scores: {[f'{s:.3f}' for s in stmt_scores[:5]]}...")  # Show first 5 scores
             
             statements.append({
-                'text': sentence,
-                'tokens': response_tokens[start_idx:end_idx],
-                'scores': response_scores[start_idx:end_idx],
-                'start_idx': assistant_start_idx + start_idx,
-                'end_idx': assistant_start_idx + end_idx - 1
+                'text': sentence_text,
+                'tokens': stmt_tokens,
+                'scores': stmt_scores,
+                'start_idx': assistant_start_idx + start_token_idx,
+                'end_idx': assistant_start_idx + end_token_idx - 1
             })
         
         # Identify which contains the lie
@@ -96,6 +179,7 @@ def extract_three_statements_from_tokens(tokens: List[str], token_scores: List[f
         }
         
     except Exception as e:
+        print(f"Error in extract_three_statements_from_tokens: {e}")
         return None
 
 def identify_lie_statement_simple(statements: List[Dict], lie_statement: str) -> Optional[int]:
@@ -322,6 +406,96 @@ def calculate_delta_statistics(ttol_results: List[Dict]) -> Dict:
         'num_examples': len(delta_analyses)
     }
 
+def create_2t1l_plots(probe_type_dir: Path, probe_type: str):
+    """Create 2T1L performance plots for a probe type"""
+    import matplotlib.pyplot as plt
+    
+    # Load the aggregated results
+    results_file = probe_type_dir / 'all_layers_2t1l.json'
+    if not results_file.exists():
+        return
+    
+    with open(results_file, 'r') as f:
+        data = json.load(f)
+    
+    layers = sorted([int(l) for l in data['layers'].keys()])
+    
+    # Extract metrics by layer
+    probe_accs = []
+    probe_losses = []
+    random_accs = []
+    random_losses = []
+    delta_seps = []
+    
+    for layer in layers:
+        layer_data = data['layers'][str(layer)]
+        probe_accs.append(layer_data['probe_performance']['ttol_accuracy'])
+        probe_losses.append(layer_data['probe_performance']['avg_ttol_loss'])
+        
+        if layer_data.get('random_baseline'):
+            random_accs.append(layer_data['random_baseline']['ttol_accuracy'])
+            random_losses.append(layer_data['random_baseline']['avg_ttol_loss'])
+        else:
+            random_accs.append(1/3)  # Theoretical random accuracy
+            random_losses.append(0.0)  # Theoretical random loss
+        
+        if layer_data.get('delta_analysis'):
+            delta_seps.append(layer_data['delta_analysis']['avg_delta_separation'])
+        else:
+            delta_seps.append(0.0)
+    
+    # Create plots
+    fig, axes = plt.subplots(2, 2, figsize=(15, 12))
+    
+    # 1. Cross-entropy loss
+    ax = axes[0, 0]
+    ax.plot(layers, probe_losses, 'b-o', label='Probe Loss', linewidth=2)
+    ax.plot(layers, random_losses, 'r--', label='Random Baseline', alpha=0.7)
+    ax.set_xlabel('Layer')
+    ax.set_ylabel('Cross-Entropy Loss')
+    ax.set_title(f'{probe_type} - 2T1L Cross-Entropy Loss')
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+    
+    # 2. Accuracy
+    ax = axes[0, 1]
+    ax.plot(layers, probe_accs, 'b-o', label='Probe Accuracy', linewidth=2)
+    ax.plot(layers, random_accs, 'r--', label='Random Baseline', alpha=0.7)
+    ax.set_xlabel('Layer')
+    ax.set_ylabel('Accuracy')
+    ax.set_title(f'{probe_type} - 2T1L Accuracy')
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+    
+    # 3. Improvement over random
+    ax = axes[1, 0]
+    acc_improvements = [p - r for p, r in zip(probe_accs, random_accs)]
+    loss_improvements = [r - p for p, r in zip(probe_losses, random_losses)]
+    ax.plot(layers, acc_improvements, 'g-o', label='Accuracy Improvement', linewidth=2)
+    ax.set_xlabel('Layer')
+    ax.set_ylabel('Improvement over Random')
+    ax.set_title(f'{probe_type} - Improvement over Random Baseline')
+    ax.axhline(y=0, color='black', linestyle='-', alpha=0.3)
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+    
+    # 4. Delta separation
+    ax = axes[1, 1]
+    ax.plot(layers, delta_seps, 'm-o', label='Delta Separation', linewidth=2)
+    ax.set_xlabel('Layer')
+    ax.set_ylabel('Lie vs Truth Score Delta')
+    ax.set_title(f'{probe_type} - Statement Score Delta Separation')
+    ax.axhline(y=0, color='black', linestyle='-', alpha=0.3)
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    plt.savefig(probe_type_dir / '2t1l_performance.png', dpi=300, bbox_inches='tight')
+    plt.close()
+    
+    print(f"    Saved 2T1L plots to {probe_type_dir / '2t1l_performance.png'}")
+
+
 def add_2t1l_analysis_to_saved_results(results_dir: str, dataset_path: str):
     """Add 2T1L analysis to existing saved results"""
     
@@ -342,6 +516,7 @@ def add_2t1l_analysis_to_saved_results(results_dir: str, dataset_path: str):
     print(f"Loaded {len(truth_lie_pairs)} truth/lie pairs from dataset")
     
     results_path = Path(results_dir)
+    all_probe_type_summaries = {}
     
     # Process each probe type
     for probe_type_dir in results_path.iterdir():
@@ -351,13 +526,15 @@ def add_2t1l_analysis_to_saved_results(results_dir: str, dataset_path: str):
         probe_type = probe_type_dir.name
         print(f"\nProcessing {probe_type} probes for 2T1L analysis")
         
+        probe_type_layer_results = {}
+        
         # Process each layer
         for layer_dir in probe_type_dir.iterdir():
             if not layer_dir.is_dir() or not layer_dir.name.startswith('layer_'):
                 continue
             
             layer_num = layer_dir.name.split('_')[1]
-            sample_scores_file = layer_dir / 'sample_token_scores.json'
+            sample_scores_file = layer_dir / 'full_results.json'
             
             if not sample_scores_file.exists():
                 continue
@@ -366,8 +543,9 @@ def add_2t1l_analysis_to_saved_results(results_dir: str, dataset_path: str):
             
             # Load the saved sample scores
             with open(sample_scores_file, 'r') as f:
-                samples = json.load(f)
-            
+                data = json.load(f)
+
+            samples = data["all_samples"]
             ttol_results = []
             random_baseline_results = []
             matches_found = 0
@@ -473,6 +651,10 @@ def add_2t1l_analysis_to_saved_results(results_dir: str, dataset_path: str):
                     'delta_analysis': delta_stats
                 }
                 
+                # Store in probe type results
+                probe_type_layer_results[int(layer_num)] = ttol_summary
+                
+                # Save individual layer file
                 ttol_file = layer_dir / 'ttol_analysis.json'
                 with open(ttol_file, 'w') as f:
                     json.dump(ttol_summary, f, indent=2)
@@ -492,6 +674,146 @@ def add_2t1l_analysis_to_saved_results(results_dir: str, dataset_path: str):
                     print(f"    Saved 2T1L analysis: {len(ttol_results)} examples, accuracy: {probe_acc:.3f}, avg_loss: {probe_loss:.3f}")
             else:
                 print(f"    No 2T1L results generated for {probe_type} layer {layer_num}")
+        
+        # After processing all layers for this probe type, create aggregated results
+        if probe_type_layer_results:
+            layer_data = list(probe_type_layer_results.values())
+            
+            # Calculate summary statistics across all layers
+            probe_accs = [ld['probe_performance']['ttol_accuracy'] for ld in layer_data]
+            probe_losses = [ld['probe_performance']['avg_ttol_loss'] for ld in layer_data]
+            
+            random_accs = []
+            random_losses = []
+            delta_separations = []
+            
+            for ld in layer_data:
+                if ld.get('random_baseline'):
+                    random_accs.append(ld['random_baseline']['ttol_accuracy'])
+                    random_losses.append(ld['random_baseline']['avg_ttol_loss'])
+                if ld.get('delta_analysis'):
+                    delta_separations.append(ld['delta_analysis']['avg_delta_separation'])
+            
+            # Find best performing layers
+            best_acc_layer = max(layer_data, key=lambda x: x['probe_performance']['ttol_accuracy'])
+            best_loss_layer = min(layer_data, key=lambda x: x['probe_performance']['avg_ttol_loss'])
+            best_delta_layer = None
+            if delta_separations:
+                best_delta_layer = max(layer_data, key=lambda x: x.get('delta_analysis', {}).get('avg_delta_separation', -999))
+            
+            probe_type_summary = {
+                'probe_type': probe_type,
+                'num_layers': len(layer_data),
+                'layers': probe_type_layer_results,
+                'summary_stats': {
+                    'best_layer_by_accuracy': best_acc_layer['layer'],
+                    'best_accuracy': best_acc_layer['probe_performance']['ttol_accuracy'],
+                    'best_layer_by_loss': best_loss_layer['layer'],
+                    'best_loss': best_loss_layer['probe_performance']['avg_ttol_loss'],
+                    'best_layer_by_delta': best_delta_layer['layer'] if best_delta_layer else None,
+                    'best_delta_separation': best_delta_layer.get('delta_analysis', {}).get('avg_delta_separation') if best_delta_layer else None,
+                    'avg_probe_accuracy': float(np.mean(probe_accs)),
+                    'avg_probe_loss': float(np.mean(probe_losses)),
+                    'avg_random_accuracy': float(np.mean(random_accs)) if random_accs else None,
+                    'avg_random_loss': float(np.mean(random_losses)) if random_losses else None,
+                    'avg_delta_separation': float(np.mean(delta_separations)) if delta_separations else None,
+                    'accuracy_improvement': float(np.mean(probe_accs) - np.mean(random_accs)) if random_accs else None,
+                    'loss_improvement': float(np.mean(random_losses) - np.mean(probe_losses)) if random_losses else None
+                }
+            }
+            
+            # Store for cross-probe-type comparison
+            all_probe_type_summaries[probe_type] = probe_type_summary
+            
+            # Save aggregated results
+            with open(probe_type_dir / 'all_layers_2t1l.json', 'w') as f:
+                json.dump(probe_type_summary, f, indent=2)
+            
+            # Create plots
+            create_2t1l_plots(probe_type_dir, probe_type)
+            
+            print(f"\n  ✓ Saved aggregated 2T1L results for {probe_type}")
+            print(f"    📊 Best accuracy: Layer {probe_type_summary['summary_stats']['best_layer_by_accuracy']} ({probe_type_summary['summary_stats']['best_accuracy']:.3f})")
+            print(f"    📈 Best loss: Layer {probe_type_summary['summary_stats']['best_layer_by_loss']} ({probe_type_summary['summary_stats']['best_loss']:.3f})")
+            if probe_type_summary['summary_stats']['best_layer_by_delta']:
+                print(f"    🎯 Best delta: Layer {probe_type_summary['summary_stats']['best_layer_by_delta']} ({probe_type_summary['summary_stats']['best_delta_separation']:.3f})")
+            print(f"    🚀 Avg improvement: {probe_type_summary['summary_stats']['accuracy_improvement']:.3f} accuracy")
+    
+    # Create cross-probe-type comparison
+    if all_probe_type_summaries:
+        print(f"\n{'='*60}")
+        print("🏆 CROSS-PROBE-TYPE PERFORMANCE SUMMARY")
+        print(f"{'='*60}")
+        
+        # Sort by best accuracy
+        probe_types_by_acc = sorted(all_probe_type_summaries.items(), 
+                                  key=lambda x: x[1]['summary_stats']['best_accuracy'], 
+                                  reverse=True)
+        
+        print("\n🎯 BEST ACCURACY RANKING:")
+        for i, (probe_type, summary) in enumerate(probe_types_by_acc, 1):
+            stats = summary['summary_stats']
+            print(f"  {i}. {probe_type.upper()}: {stats['best_accuracy']:.3f} (Layer {stats['best_layer_by_accuracy']})")
+        
+        # Sort by best loss (lower is better)
+        probe_types_by_loss = sorted(all_probe_type_summaries.items(), 
+                                   key=lambda x: x[1]['summary_stats']['best_loss'])
+        
+        print("\n📈 BEST LOSS RANKING (lower is better):")
+        for i, (probe_type, summary) in enumerate(probe_types_by_loss, 1):
+            stats = summary['summary_stats']
+            print(f"  {i}. {probe_type.upper()}: {stats['best_loss']:.3f} (Layer {stats['best_layer_by_loss']})")
+        
+        # Sort by best delta separation
+        probe_types_with_delta = [(k, v) for k, v in all_probe_type_summaries.items() 
+                                 if v['summary_stats']['best_delta_separation'] is not None]
+        if probe_types_with_delta:
+            probe_types_by_delta = sorted(probe_types_with_delta, 
+                                        key=lambda x: x[1]['summary_stats']['best_delta_separation'], 
+                                        reverse=True)
+            
+            print("\n🎯 BEST DELTA SEPARATION RANKING:")
+            for i, (probe_type, summary) in enumerate(probe_types_by_delta, 1):
+                stats = summary['summary_stats']
+                print(f"  {i}. {probe_type.upper()}: {stats['best_delta_separation']:.3f} (Layer {stats['best_layer_by_delta']})")
+        
+        # Overall improvement ranking
+        probe_types_by_improvement = sorted(all_probe_type_summaries.items(), 
+                                          key=lambda x: x[1]['summary_stats']['accuracy_improvement'] or 0, 
+                                          reverse=True)
+        
+        print("\n🚀 OVERALL IMPROVEMENT RANKING:")
+        for i, (probe_type, summary) in enumerate(probe_types_by_improvement, 1):
+            stats = summary['summary_stats']
+            acc_imp = stats['accuracy_improvement'] or 0
+            loss_imp = stats['loss_improvement'] or 0
+            print(f"  {i}. {probe_type.upper()}: +{acc_imp:.3f} acc, +{loss_imp:.3f} loss")
+        
+        # Save cross-probe comparison
+        cross_comparison = {
+            'summary': {
+                'total_probe_types': len(all_probe_type_summaries),
+                'best_overall_accuracy': probe_types_by_acc[0][1]['summary_stats']['best_accuracy'],
+                'best_overall_accuracy_probe': probe_types_by_acc[0][0],
+                'best_overall_loss': probe_types_by_loss[0][1]['summary_stats']['best_loss'],
+                'best_overall_loss_probe': probe_types_by_loss[0][0],
+            },
+            'probe_type_summaries': all_probe_type_summaries,
+            'rankings': {
+                'by_accuracy': [(pt, s['summary_stats']['best_accuracy']) for pt, s in probe_types_by_acc],
+                'by_loss': [(pt, s['summary_stats']['best_loss']) for pt, s in probe_types_by_loss],
+                'by_delta': [(pt, s['summary_stats']['best_delta_separation']) for pt, s in probe_types_by_delta] if probe_types_with_delta else [],
+                'by_improvement': [(pt, s['summary_stats']['accuracy_improvement']) for pt, s in probe_types_by_improvement]
+            }
+        }
+        
+        with open(results_path / 'cross_probe_2t1l_comparison.json', 'w') as f:
+            json.dump(cross_comparison, f, indent=2)
+        
+        print(f"\n💾 Saved cross-probe comparison to cross_probe_2t1l_comparison.json")
+        print(f"{'='*60}")
+    
+    print("\n✅ 2T1L analysis complete!")
 
 def main():
     parser = argparse.ArgumentParser(description='Add 2T1L analysis to existing probe results')

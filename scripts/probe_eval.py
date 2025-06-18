@@ -26,11 +26,13 @@ class OptimizedBatchProbeEvaluator:
         
         # Load model once
         print(f"Loading model {model_name}")
-        model_dtype = get_model_dtype(model_name)
+        self.model_dtype = get_model_dtype(model_name)
+        print(f"Using model dtype: {self.model_dtype}")
+        
         self.model = HookedTransformer.from_pretrained_no_processing(
             model_name,
             device=device,
-            dtype=model_dtype,
+            dtype=self.model_dtype,
         )
         self.model.eval()
         
@@ -55,22 +57,33 @@ class OptimizedBatchProbeEvaluator:
             from transformers import AutoTokenizer
             tokenizer = AutoTokenizer.from_pretrained(self.model.cfg.model_name)
         
-        # First, tokenize all texts to find the maximum length
-        print("Tokenizing all texts to determine max length...")
-        all_text_tokens = []
-        max_length = 0
+        print(f"Tokenizer pad_token_id: {tokenizer.pad_token_id}")
+        print(f"Tokenizer eos_token_id: {tokenizer.eos_token_id}")
+        print(f"Tokenizer vocab size: {len(tokenizer)}")
         
-        for text in texts:
-            tokens = tokenizer(text, return_tensors="pt", add_special_tokens=True)
-            seq_len = tokens["input_ids"].shape[1]
-            max_length = max(max_length, seq_len)
-            all_text_tokens.append(tokens["input_ids"][0])
+        # First, let's tokenize a single text to see what's happening
+        if texts:
+            print("\n=== DEBUG: Single text tokenization ===")
+            sample_text = texts[0]
+            print(f"Sample text length: {len(sample_text)}")
+            print(f"Sample text end: ...{sample_text[-100:]}")
+            
+            # Test different tokenization approaches
+            single_tokens1 = tokenizer(sample_text, return_tensors="pt", add_special_tokens=False)
+            single_tokens2 = tokenizer(sample_text, return_tensors="pt", add_special_tokens=True)
+            
+            print(f"Without add_special_tokens: {single_tokens1['input_ids'].shape}")
+            print(f"With add_special_tokens: {single_tokens2['input_ids'].shape}")
+            
+            # Decode the end of both
+            tokens1 = single_tokens1['input_ids'][0]
+            tokens2 = single_tokens2['input_ids'][0]
+            
+            print(f"Last 10 tokens (no special): {tokenizer.convert_ids_to_tokens(tokens1[-10:])}")
+            print(f"Last 10 tokens (with special): {tokenizer.convert_ids_to_tokens(tokens2[-10:])}")
+            print("=== END DEBUG ===\n")
         
-        # Cap max_length for memory efficiency
-        max_length = min(max_length, 512)
-        print(f"Using max_length: {max_length}")
-        
-        # Process in batches with consistent padding
+        # Process in batches
         all_activations = {layer: [] for layer in layers}
         all_tokens = []
         
@@ -78,14 +91,18 @@ class OptimizedBatchProbeEvaluator:
             for i in range(0, len(texts), batch_size):
                 batch_texts = texts[i:i + batch_size]
                 
-                # Tokenize batch with fixed max_length for consistency
+                print(f"Processing batch {i//batch_size + 1}/{(len(texts) + batch_size - 1)//batch_size}")
+                
+                # Tokenize batch
                 tokens = tokenizer(
                     batch_texts, 
                     return_tensors="pt", 
-                    padding="max_length",  # Use max_length padding
-                    truncation=True,
-                    max_length=max_length
+                    padding=True,  # Pad to longest in batch
+                    truncation=False,  # No truncation
+                    add_special_tokens=False  # Texts already have special tokens
                 ).to(self.device)
+                
+                print(f"Batch tokenized shape: {tokens['input_ids'].shape}")
                 
                 # Run model with caching
                 _, cache = self.model.run_with_cache(
@@ -95,28 +112,109 @@ class OptimizedBatchProbeEvaluator:
                     stop_at_layer=max(layers) + 1
                 )
                 
-                # Store activations for each layer
+                # Store activations for each layer - KEEP ORIGINAL DTYPE
                 for layer in layers:
                     hook_point = f"blocks.{layer}.hook_resid_pre"
-                    all_activations[layer].append(cache[hook_point].cpu())
-                
-                # Store tokens for later use (with original lengths, not padded)
+                    # Keep activations in original dtype (bfloat16) - don't convert to CPU yet
+                    all_activations[layer].append(cache[hook_point])
+
+                # Store tokens for later use - FIXED VERSION FOR EOS=PAD
                 for j, text in enumerate(batch_texts):
                     text_tokens = tokens["input_ids"][j]
-                    # Find actual length (before padding)
-                    if tokenizer.pad_token_id is not None:
-                        actual_length = (text_tokens != tokenizer.pad_token_id).sum().item()
-                    else:
-                        actual_length = len(text_tokens)
                     
-                    actual_tokens = text_tokens[:actual_length]
+                    if tokenizer.pad_token_id is not None and tokenizer.pad_token_id == tokenizer.eos_token_id:
+                        # Special case: pad_token_id == eos_token_id
+                        # We need to find where padding starts (consecutive eos tokens)
+                        eos_positions = torch.where(text_tokens == tokenizer.eos_token_id)[0]
+                        
+                        if len(eos_positions) > 0:
+                            # Look for the first position where we have consecutive eos tokens
+                            # The real content should end with a single eos, then padding starts
+                            content_end_pos = len(text_tokens)  # Default to full length
+                            
+                            for i in range(len(eos_positions) - 1):
+                                pos = eos_positions[i].item()
+                                next_pos = eos_positions[i + 1].item()
+                                
+                                # If two eos tokens are consecutive, the second one starts padding
+                                if next_pos == pos + 1:
+                                    content_end_pos = next_pos
+                                    break
+                            
+                            # If no consecutive eos found, check if the last tokens are all eos (padding)
+                            if content_end_pos == len(text_tokens):
+                                # Count consecutive eos tokens from the end
+                                consecutive_eos_from_end = 0
+                                for k in range(len(text_tokens) - 1, -1, -1):
+                                    if text_tokens[k] == tokenizer.eos_token_id:
+                                        consecutive_eos_from_end += 1
+                                    else:
+                                        break
+                                
+                                # If more than 1 consecutive eos at the end, assume padding
+                                if consecutive_eos_from_end > 1:
+                                    content_end_pos = len(text_tokens) - consecutive_eos_from_end + 1
+                            
+                            actual_tokens = text_tokens[:content_end_pos]
+                        else:
+                            # No eos tokens found
+                            actual_tokens = text_tokens
+                            
+                    elif tokenizer.pad_token_id is not None:
+                        # Normal case: different pad and eos tokens
+                        pad_positions = torch.where(text_tokens == tokenizer.pad_token_id)[0]
+                        if len(pad_positions) > 0:
+                            first_pad_pos = pad_positions[0].item()
+                            actual_tokens = text_tokens[:first_pad_pos]
+                        else:
+                            actual_tokens = text_tokens
+                    else:
+                        # No pad token defined
+                        actual_tokens = text_tokens
+                    
                     token_texts = tokenizer.convert_ids_to_tokens(actual_tokens)
                     all_tokens.append(token_texts)
+                    
+                    # Debug print for first few examples
+                    if len(all_tokens) <= 3 or len(all_tokens) % 50 == 0:
+                        print(f"Text {len(all_tokens)}: {len(token_texts)} tokens")
+                        print(f"  First 5: {token_texts[:5]}")
+                        print(f"  Last 5: {token_texts[-5:]}")
+                        if len(eos_positions) > 0:
+                            print(f"  EOS positions: {eos_positions.tolist()}")
+                            print(f"  Content end position: {content_end_pos}")
+
+        # Since batches may have different padding lengths, we need to pad all to the same length
+        # Find the maximum sequence length across all batches
+        max_seq_len = 0
+        for layer in layers:
+            for batch_activations in all_activations[layer]:
+                max_seq_len = max(max_seq_len, batch_activations.shape[1])
         
-        # Concatenate all batches (now they should have consistent dimensions)
+        print(f"Maximum sequence length across all batches: {max_seq_len}")
+        
+        # Pad all batches to the same length
+        for layer in layers:
+            padded_batches = []
+            for batch_activations in all_activations[layer]:
+                batch_size, seq_len, hidden_size = batch_activations.shape
+                if seq_len < max_seq_len:
+                    # Pad with zeros - MAINTAIN DTYPE
+                    padding = torch.zeros(
+                        batch_size, max_seq_len - seq_len, hidden_size, 
+                        dtype=batch_activations.dtype, device=batch_activations.device
+                    )
+                    padded_batch = torch.cat([batch_activations, padding], dim=1)
+                else:
+                    padded_batch = batch_activations
+                padded_batches.append(padded_batch)
+            all_activations[layer] = padded_batches
+        
+        # Concatenate all batches - MAINTAIN DTYPE
         final_activations = {}
         for layer in layers:
             final_activations[layer] = torch.cat(all_activations[layer], dim=0)
+            print(f"Final activations for layer {layer}: {final_activations[layer].shape}, dtype: {final_activations[layer].dtype}")
         
         # Cache results
         result = {
@@ -170,6 +268,8 @@ class OptimizedBatchProbeEvaluator:
                 results[(layer, probe_type)] = probe_results
         
         return results
+
+    
     
     def _evaluate_single_probe_batch(self, probe: BaseProbe, 
                                    layer_activations: torch.Tensor,
@@ -178,7 +278,23 @@ class OptimizedBatchProbeEvaluator:
                                    tokens_by_text: List[List[str]]) -> Dict:
         """Evaluate a single probe on batch data"""
         
+        # Move probe to device and ensure it matches model dtype
         probe = probe.to(self.device)
+        
+        # Get probe's expected dtype - check parameters first, then buffers
+        probe_dtype = self.model_dtype  # Default to model dtype
+        try:
+            probe_dtype = next(probe.parameters()).dtype
+        except StopIteration:
+            # No parameters, check buffers
+            try:
+                probe_dtype = next(probe.buffers()).dtype
+            except StopIteration:
+                # No buffers either, use model dtype
+                probe_dtype = self.model_dtype
+        
+        print(f"Probe dtype: {probe_dtype}, Activations dtype: {layer_activations.dtype}")
+        
         probe.eval()
         
         # Get token-level scores for all texts at once
@@ -194,6 +310,10 @@ class OptimizedBatchProbeEvaluator:
                 
                 # Get activations for this text (up to actual length)
                 text_activations = layer_activations[i, :actual_length, :].to(self.device)
+                
+                # ENSURE DTYPE COMPATIBILITY
+                if text_activations.dtype != probe_dtype:
+                    text_activations = text_activations.to(dtype=probe_dtype)
                 
                 # Apply probe to all tokens for this text
                 token_scores = probe(text_activations)

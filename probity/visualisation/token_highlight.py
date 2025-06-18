@@ -250,33 +250,33 @@ def generate_token_visualization(token_details: List[Dict], output_path: Path) -
     
     print(f"HTML visualization saved to: {output_path}")
 
-def save_token_scores_csv(token_details: List[Dict], output_path: Path) -> None:
-    """Save token scores in CSV format for additional analysis."""
-    import pandas as pd
+# def save_token_scores_csv(token_details: List[Dict], output_path: Path) -> None:
+#     """Save token scores in CSV format for additional analysis."""
+#     import pandas as pd
     
-    # Get globally normalized scores
-    all_scores = [detail['token_scores'] for detail in token_details]
-    normalized_scores_list = normalize_scores_global(all_scores)
+#     # Get globally normalized scores
+#     all_scores = [detail['token_scores'] for detail in token_details]
+#     normalized_scores_list = normalize_scores_global(all_scores)
     
-    # Prepare data for DataFrame
-    rows = []
-    for i, detail in enumerate(token_details):
-        clean_tokens = clean_llama_tokens(detail['tokens'])
-        normalized_scores = normalized_scores_list[i]
+#     # Prepare data for DataFrame
+#     rows = []
+#     for i, detail in enumerate(token_details):
+#         clean_tokens = clean_llama_tokens(detail['tokens'])
+#         normalized_scores = normalized_scores_list[i]
         
-        for token, orig_score, norm_score in zip(clean_tokens, detail['token_scores'], normalized_scores):
-            rows.append({
-                'text': detail['text'],
-                'label': detail['label'],
-                'token': token,
-                'original_score': orig_score,
-                'normalized_score': norm_score
-            })
+#         for token, orig_score, norm_score in zip(clean_tokens, detail['token_scores'], normalized_scores):
+#             rows.append({
+#                 'text': detail['text'],
+#                 'label': detail['label'],
+#                 'token': token,
+#                 'original_score': orig_score,
+#                 'normalized_score': norm_score
+#             })
     
-    # Create and save DataFrame
-    df = pd.DataFrame(rows)
-    df.to_csv(output_path, index=False)
-    print(f"CSV data saved to: {output_path}")
+#     # Create and save DataFrame
+#     df = pd.DataFrame(rows)
+#     df.to_csv(output_path, index=False)
+#     print(f"CSV data saved to: {output_path}")
 
 # Example usage function
 def process_token_data(token_details: List[Dict], output_dir: Path = Path("./output")) -> None:
@@ -284,10 +284,10 @@ def process_token_data(token_details: List[Dict], output_dir: Path = Path("./out
     output_dir.mkdir(exist_ok=True)
     
     html_path = output_dir / "token_visualization.html"
-    csv_path = output_dir / "token_scores.csv"
+    # csv_path = output_dir / "token_scores.csv"
     
     generate_token_visualization(token_details, html_path)
-    save_token_scores_csv(token_details, csv_path)
+    # save_token_scores_csv(token_details, csv_path)
     
     print(f"Processing complete. Files saved to: {output_dir}")
 
