@@ -1,6 +1,6 @@
 # Soothcheck
 
-A project for investigating truth detection and verification in large language models.
+A project for investigating lie detection and verification in large language models.
 
 ## Overview
 
@@ -61,8 +61,8 @@ If you use this work, please cite both this project and the underlying Probity l
 **Soothcheck:**
 ```
 @software{soothcheck,
-  author = {Parrack, Avi},
-  title = {Soothcheck: Truth Detection in Large Language Models},
+  author = {Parrack, Avi}, {Nguyen, Jord}, {Attubato, Carlo}
+  title = {Soothcheck: Lie Detection in Large Language Models},
   year = {2025},
   url = {https://github.com/AviParrack/Soothcheck}
 }
