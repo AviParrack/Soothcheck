@@ -155,9 +155,6 @@ class DatasetGenerator:
         
         logger.info(f"Generating {num_samples} samples for ratio {ratio_name} ({n_truths}T{n_lies}L)")
         
-        # Generate system prompt
-        system_prompt = self.config.get_system_prompt(n_truths, n_lies)
-        
         # Generate multiple statement samples
         statement_samples = self.sampler.generate_multiple_samples(
             n_truths, n_lies, num_samples
@@ -168,12 +165,26 @@ class DatasetGenerator:
         for i, statements in enumerate(statement_samples):
             conversation_id = f"{ratio_name}_{i:03d}"
             
+            # Determine lie positions (1-indexed) after statements are shuffled
+            lie_positions = []
+            for pos, stmt in enumerate(statements, 1):  # 1-indexed positions
+                if not stmt['label']:  # label=False means it's a lie
+                    lie_positions.append(pos)
+            
+            # Generate system prompt with specific lie positions
+            system_prompt = self.config.get_system_prompt(
+                n_truths, n_lies, lie_positions
+            )
+            
             conversation = self.formatter.format_conversation(
                 system_prompt=system_prompt,
                 statements=statements,
                 conversation_id=conversation_id,
                 add_timestamp=self.config.add_timestamps
             )
+            
+            # Add lie positions to metadata for analysis (always useful)
+            conversation['labels']['lie_positions'] = lie_positions
             
             # Validate conversation if enabled
             if self.config.validate_output:
