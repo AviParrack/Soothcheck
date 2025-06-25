@@ -18,7 +18,7 @@ from typing import List, Optional
 # Add probity to path for imports
 sys.path.append(str(Path(__file__).parent.parent.parent))
 
-from config import GenerationConfig, DEFAULT_RATIOS
+from config import GenerationConfig, DEFAULT_RATIOS, DEFAULT_CONFIG
 from ntml_generator import DatasetGenerator
 
 def setup_logging(verbose: bool = False):
@@ -58,8 +58,8 @@ def parse_args():
     parser.add_argument(
         '--output-dir',
         type=str,
-        default='data/NTML-datasets',
-        help='Output directory for generated datasets (default: data/NTML-datasets)'
+        default=None,
+        help='Output directory for generated datasets (default: auto-detected probity/data/NTML-datasets)'
     )
     
     parser.add_argument(
@@ -72,15 +72,15 @@ def parse_args():
     parser.add_argument(
         '--truth-bank',
         type=str,
-        default='data/statement-banks/truth_bank.csv',
-        help='Path to truth statement bank CSV file'
+        default=None,
+        help='Path to truth statement bank CSV file (default: auto-detected probity/data/statement-banks/truth_bank.csv)'
     )
     
     parser.add_argument(
         '--lie-bank',
         type=str,
-        default='data/statement-banks/lie_bank.csv',
-        help='Path to lie statement bank CSV file'
+        default=None,
+        help='Path to lie statement bank CSV file (default: auto-detected probity/data/statement-banks/lie_bank.csv)'
     )
     
     parser.add_argument(
@@ -197,9 +197,9 @@ def main():
         config = GenerationConfig(
             samples_per_ratio=args.samples,
             random_seed=args.seed,
-            truth_bank_path=args.truth_bank,
-            lie_bank_path=args.lie_bank,
-            output_dir=args.output_dir,
+            truth_bank_path=args.truth_bank or DEFAULT_CONFIG.truth_bank_path,
+            lie_bank_path=args.lie_bank or DEFAULT_CONFIG.lie_bank_path,
+            output_dir=args.output_dir or DEFAULT_CONFIG.output_dir,
             target_ratios=target_ratios,
             add_timestamps=not args.no_timestamps,
             validate_output=not args.no_validation

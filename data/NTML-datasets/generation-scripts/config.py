@@ -8,6 +8,38 @@ for creating conversational truth/lie datasets.
 from typing import List, Dict, Any
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
+import os
+
+def find_probity_root() -> Path:
+    """Find the probity root directory by looking for pyproject.toml marker file.
+    
+    Returns:
+        Path to probity root directory
+        
+    Raises:
+        RuntimeError: If probity root cannot be found
+    """
+    # Start from current script location and work upward
+    current_path = Path(__file__).resolve()
+    
+    # Look for pyproject.toml as marker for probity root
+    for parent in [current_path] + list(current_path.parents):
+        if (parent / "pyproject.toml").exists():
+            return parent
+    
+    # Fallback: look for probity directory structure
+    for parent in [current_path] + list(current_path.parents):
+        if (parent / "probity" / "__init__.py").exists() and (parent / "data").exists():
+            return parent
+    
+    raise RuntimeError(
+        "Could not find probity root directory. "
+        "Make sure you're running from within the probity project structure."
+    )
+
+# Find probity root automatically
+PROBITY_ROOT = find_probity_root()
 
 # Target truth-to-lie ratios for dataset generation
 DEFAULT_RATIOS = [
@@ -32,10 +64,10 @@ class GenerationConfig:
     samples_per_ratio: int = 500
     random_seed: int = 42
     
-    # File paths (relative to probity/)
-    truth_bank_path: str = "data/statement-banks/truth_bank.csv"
-    lie_bank_path: str = "data/statement-banks/lie_bank.csv"
-    output_dir: str = "data/NTML-datasets"
+    # File paths (now absolute, resolved automatically)
+    truth_bank_path: str = str(PROBITY_ROOT / "data" / "statement-banks" / "truth_bank.csv")
+    lie_bank_path: str = str(PROBITY_ROOT / "data" / "statement-banks" / "lie_bank.csv")
+    output_dir: str = str(PROBITY_ROOT / "data" / "NTML-datasets")
     
     # Target ratios to generate
     target_ratios: List[Dict[str, Any]] = None
