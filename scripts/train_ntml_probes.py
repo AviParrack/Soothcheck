@@ -220,6 +220,11 @@ Examples:
         action="store_true",
         help="Enable debug mode with detailed pipeline tracing"
     )
+    parser.add_argument(
+        "--probe-debug",
+        action="store_true",
+        help="Enable detailed probe training debugging (shows exact examples, tokens, positions)"
+    )
     
     return parser.parse_args()
 
@@ -431,9 +436,125 @@ def debug_print_training_data_split(train_examples, val_examples):
                 print(f"     - Target token: '{ex.tokens[pos]}'")
 
 
-def debug_training_wrapper(pipeline, debug_mode=False):
+def debug_detailed_probe_examples(tokenized_dataset, model_name, hook_point, num_examples=3):
+    """Show detailed breakdown of exactly what the probe training process sees."""
+    print(f"\n🔬 DETAILED PROBE TRAINING DEBUG")
+    print("=" * 60)
+    print(f"Showing exactly what the probe training process sees for first {num_examples} examples:")
+    
+    # Load tokenizer for decoding
+    from transformers import AutoTokenizer
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    
+    for i in range(min(num_examples, len(tokenized_dataset.examples))):
+        ex = tokenized_dataset.examples[i]
+        print(f"\n{'='*50}")
+        print(f"📋 TRAINING EXAMPLE #{i+1}")
+        print(f"{'='*50}")
+        
+        # Basic example info
+        print(f"🏷️  LABELS & METADATA:")
+        print(f"   • Label: {ex.label} ({'TRUE' if ex.label else 'FALSE'})")
+        print(f"   • Label text: {ex.label_text}")
+        print(f"   • Group ID: {ex.group_id}")
+        
+        # Show what statement this is
+        if hasattr(ex, 'attributes') and ex.attributes:
+            stmt_idx = ex.attributes.get('statement_idx', 'unknown')
+            stmt_text = ex.attributes.get('statement_text', 'unknown')
+            print(f"   • Statement index: {stmt_idx}")
+            print(f"   • Target statement: \"{stmt_text}\"")
+        
+        # Full text the model sees
+        print(f"\n📝 FULL TEXT (what model processes):")
+        print(f"   Length: {len(ex.text)} characters")
+        print(f"   Text preview:")
+        lines = ex.text.split('\n')
+        for j, line in enumerate(lines):
+            print(f"     {j+1}: {line}")
+        
+        # Tokenization details
+        print(f"\n🔤 TOKENIZATION DETAILS:")
+        print(f"   • Total tokens: {len(ex.tokens)}")
+        max_length = 'unknown'
+        if hasattr(tokenized_dataset, 'tokenization_config') and hasattr(tokenized_dataset.tokenization_config, 'max_length'):
+            max_length = tokenized_dataset.tokenization_config.max_length
+        elif hasattr(tokenized_dataset, 'max_length'):
+            max_length = tokenized_dataset.max_length
+        print(f"   • Max length: {max_length}")
+        
+        # Show first and last few tokens
+        if len(ex.tokens) > 0:
+            print(f"   • First 10 tokens: {ex.tokens[:10]}")
+            print(f"   • Last 10 tokens: {ex.tokens[-10:]}")
+            
+            # Decode tokens for readability
+            try:
+                decoded_tokens = [tokenizer.decode([token_id]) for token_id in ex.tokens[:20]]
+                print(f"   • First 20 decoded: {decoded_tokens}")
+            except:
+                print(f"   • (Could not decode tokens)")
+        
+        # Target position analysis
+        if hasattr(ex, 'token_positions') and ex.token_positions:
+            print(f"\n🎯 TARGET POSITION ANALYSIS:")
+            if 'target' in ex.token_positions.positions:
+                target_pos = ex.token_positions.positions['target']
+                print(f"   • Target token position: {target_pos}")
+                
+                if isinstance(target_pos, int):
+                    # Single token position
+                    if 0 <= target_pos < len(ex.tokens):
+                        target_token_id = ex.tokens[target_pos]
+                        try:
+                            target_token_text = tokenizer.decode([target_token_id])
+                            print(f"   • Target token ID: {target_token_id}")
+                            print(f"   • Target token text: \"{target_token_text}\"")
+                        except:
+                            print(f"   • Target token ID: {target_token_id} (decode failed)")
+                        
+                        # Show context around target
+                        context_start = max(0, target_pos - 5)
+                        context_end = min(len(ex.tokens), target_pos + 6)
+                        context_tokens = ex.tokens[context_start:context_end]
+                        try:
+                            context_text = [tokenizer.decode([tid]) for tid in context_tokens]
+                            print(f"   • Context tokens ({context_start}-{context_end-1}): {context_text}")
+                            print(f"   • Target is at index {target_pos - context_start} in context: {context_text[target_pos - context_start] if target_pos - context_start < len(context_text) else 'ERROR'}")
+                        except:
+                            print(f"   • Context tokens: {context_tokens} (decode failed)")
+                    else:
+                        print(f"   • ❌ Target position {target_pos} out of bounds (0-{len(ex.tokens)-1})")
+                
+        # Character positions (original)
+        if hasattr(ex, 'character_positions') and ex.character_positions:
+            print(f"\n📍 CHARACTER POSITIONS:")
+            for key, pos in ex.character_positions.positions.items():
+                if hasattr(pos, 'start') and hasattr(pos, 'end'):
+                    extracted_text = ex.text[pos.start:pos.end]
+                    print(f"   • {key}: chars {pos.start}-{pos.end}")
+                    print(f"     Extracted text: \"{extracted_text}\"")
+        
+        # What the probe will learn
+        print(f"\n🧠 PROBE TRAINING POINT:")
+        print(f"   • The model will process the FULL TEXT above")
+        print(f"   • Activations will be extracted at token position {target_pos if 'target_pos' in locals() else 'unknown'} (LAST token of statement)")
+        print(f"   • The probe will learn: activation_vector → {ex.label} ({'TRUE' if ex.label else 'FALSE'})")
+        if hasattr(ex, 'attributes') and ex.attributes:
+            stmt_text = ex.attributes.get('statement_text', 'unknown')
+            print(f"   • Specifically learning: when model sees \"{stmt_text}\" → {ex.label}")
+        print(f"   • Why last token? Autoregressive models have processed the entire statement by then")
+    
+    print(f"\n🎯 SUMMARY:")
+    print(f"   • The model sees complete conversations with full context")
+    print(f"   • Probes extract activations at specific statement token positions") 
+    print(f"   • Each probe training example learns: conversation_context + statement_position → true/false")
+    print(f"   • This enables statement-level truth detection within conversational context")
+
+
+def debug_training_wrapper(pipeline, debug_mode=False, probe_debug_mode=False):
     """Wrapper around pipeline training that adds debugging information."""
-    if not debug_mode:
+    if not debug_mode and not probe_debug_mode:
         return pipeline.run()
     
     print(f"\n🔍 DEBUG: Starting Training Process")
@@ -462,6 +583,15 @@ def debug_training_wrapper(pipeline, debug_mode=False):
             print(f"     - Target token position: {pos}")
             if hasattr(ex, 'tokens') and isinstance(pos, int) and pos < len(ex.tokens):
                 print(f"     - Target token: '{ex.tokens[pos]}'")
+    
+    # ENHANCED: Show detailed probe examples if probe-debug mode enabled
+    if probe_debug_mode:
+        debug_detailed_probe_examples(
+            dataset, 
+            pipeline.config.model_name, 
+            pipeline.config.hook_points[0], 
+            num_examples=3
+        )
     
     print(f"\n🚀 Starting actual training...")
     print(f"   • This will collect activations from {pipeline.config.model_name}")
@@ -599,8 +729,9 @@ def main():
             tokenized_dataset = TokenizedProbingDataset.from_probing_dataset(
                 dataset=statement_dataset,
                 tokenizer=tokenizer,
-                padding=True,
+                padding="max_length",
                 max_length=args.max_length,
+                truncation=True,
                 add_special_tokens=True
             )
             print(f"✅ Tokenized dataset (max_length: {args.max_length})")
@@ -667,7 +798,7 @@ def main():
         
         try:
             pipeline = ProbePipeline(pipeline_config)
-            probe, history = debug_training_wrapper(pipeline, args.debug)
+            probe, history = debug_training_wrapper(pipeline, args.debug, getattr(args, 'probe_debug', False))
             
             print("✅ Training completed!")
             

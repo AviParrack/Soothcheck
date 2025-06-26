@@ -109,6 +109,7 @@ class PositionFinder:
         space_precedes_token: bool = True,
         add_special_tokens: bool = True,
         padding_side: Optional[str] = None,
+        use_last_token: bool = False,
     ) -> int:
         """
         Convert character position to token position, handling special tokens properly.
@@ -120,6 +121,8 @@ class PositionFinder:
             space_precedes_token: Whether space precedes token (default: True)
             add_special_tokens: Whether to add special tokens (default: True)
             padding_side: Override tokenizer padding side (default: None)
+            use_last_token: If True and position.end is provided, find the last token
+                          of the span instead of the first token (default: False)
 
         Returns:
             Token index corresponding to the character position
@@ -138,14 +141,26 @@ class PositionFinder:
         # Find the token index in the clean encoding
         clean_token_idx = None
         assert isinstance(clean_offsets, list)  # Assure type checker it's iterable
-        for idx, (start, end) in enumerate(clean_offsets):
-            if start <= position.start < end:
-                clean_token_idx = idx
-                break
+        
+        if use_last_token and position.end is not None:
+            # Find the last token that overlaps with the character span
+            # We want the token that contains or ends at position.end - 1
+            target_char = position.end - 1  # Last character of the span
+            for idx, (start, end) in enumerate(clean_offsets):
+                if start <= target_char < end:
+                    clean_token_idx = idx
+                    break
+        else:
+            # Original behavior: find first token that contains position.start
+            for idx, (start, end) in enumerate(clean_offsets):
+                if start <= position.start < end:
+                    clean_token_idx = idx
+                    break
 
         if clean_token_idx is None:
+            target_pos = position.end - 1 if (use_last_token and position.end is not None) else position.start
             msg = (
-                f"Character position {position.start} not aligned "
+                f"Character position {target_pos} not aligned "
                 f"with any token offset."
             )
             raise ValueError(msg)

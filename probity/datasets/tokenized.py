@@ -173,6 +173,11 @@ class TokenizedProbingDataset(ProbingDataset):
                 for key, pos in example.character_positions.positions.items():
                     # Use the no-padding tokens for position conversion to get accurate positions
                     if isinstance(pos, Position):
+                        # For statement-level probing, use the last token of the span
+                        # This makes sense for autoregressive models: by the last token,
+                        # the model has processed the entire statement
+                        use_last_token = (key == "target" and pos.end is not None)
+                        
                         # Convert single position relative to unpadded tokens
                         token_pos = PositionFinder.convert_to_token_position(
                             pos,
@@ -180,6 +185,7 @@ class TokenizedProbingDataset(ProbingDataset):
                             tokenizer,
                             add_special_tokens=add_special_tokens,
                             padding_side=padding_side,
+                            use_last_token=use_last_token,
                         )
 
                         # If using left padding, the positions in padded tokens will be offset
@@ -189,6 +195,9 @@ class TokenizedProbingDataset(ProbingDataset):
                             positions[key] = token_pos
 
                     else:  # List[Position]
+                        # For statement-level probing, use the last token of each span
+                        use_last_token = (key == "target")
+                        
                         # Convert list of positions
                         token_positions = [
                             PositionFinder.convert_to_token_position(
@@ -197,6 +206,7 @@ class TokenizedProbingDataset(ProbingDataset):
                                 tokenizer,
                                 add_special_tokens=add_special_tokens,
                                 padding_side=padding_side,
+                                use_last_token=use_last_token and p.end is not None,
                             )
                             for p in pos
                         ]
