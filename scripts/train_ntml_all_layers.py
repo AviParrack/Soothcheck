@@ -187,6 +187,7 @@ def train_probe_on_layer(
     model_name: str,
     training_config: dict,
     output_dir: Path,
+    model=None,
     verbose: bool = False
 ) -> Tuple[object, Dict]:
     """Train a single probe on a specific layer."""
@@ -201,9 +202,18 @@ def train_probe_on_layer(
     if verbose:
         print(f"   🎯 Layer {layer}: {hook_point}")
     
+    # Determine input size based on model
+    if "llama" in model_name.lower():
+        if "70b" in model_name.lower():
+            input_size = 8192  # Llama 3.1 70B hidden size
+        else:
+            input_size = 4096  # Llama 3.1 8B hidden size
+    else:
+        input_size = 768  # GPT-2 hidden size
+    
     # Configure probe
     probe_config = LogisticProbeConfig(
-        input_size=768,  # GPT-2 hidden size
+        input_size=input_size,
         normalize_weights=True,
         bias=False,
         model_name=model_name,
@@ -237,9 +247,99 @@ def train_probe_on_layer(
         cache_dir=str(output_dir.parent / "cache" / "ntml_multilayer_cache")
     )
     
-    # Train probe
+    # Train probe - pass the pre-loaded model if available
     pipeline = ProbePipeline(pipeline_config)
-    probe, history = pipeline.run()
+    if model is not None:
+        # Use the pre-loaded model instead of loading a new one
+        probe, history = pipeline.run_with_model(model)
+    else:
+        probe, history = pipeline.run()
+    
+    # Save probe in probity format
+    probe_type_dir = output_dir / "logistic"
+    probe_type_dir.mkdir(parents=True, exist_ok=True)
+    probe_path = probe_type_dir / f"layer_{layer}_probe.json"
+    probe.save_json(str(probe_path))
+    
+    # Calculate final metrics
+    final_metrics = {
+        "layer": layer,
+        "final_train_loss": history["train_loss"][-1] if history["train_loss"] else float('inf'),
+        "final_val_loss": history["val_loss"][-1] if history["val_loss"] else float('inf'),
+        "min_val_loss": min(history["val_loss"]) if history["val_loss"] else float('inf'),
+        "epochs_trained": len(history["train_loss"]),
+        "probe_path": str(probe_path)
+    }
+    
+    if verbose:
+        print(f"   ✅ Layer {layer}: Final val loss = {final_metrics['final_val_loss']:.4f}")
+    
+    return probe, history, final_metrics
+
+def train_probe_on_layer_with_activations(
+    layer: int,
+    activation_store,
+    model_name: str,
+    training_config: dict,
+    output_dir: Path,
+    verbose: bool = False
+) -> Tuple[object, Dict]:
+    """Train a single probe on a specific layer using pre-collected activations."""
+    
+    from probity.probes.logistic import LogisticProbe, LogisticProbeConfig
+    from probity.training.trainer import SupervisedProbeTrainer, SupervisedTrainerConfig
+    
+    hook_point = f"blocks.{layer}.hook_resid_pre"
+    probe_name = f"ntml_multilayer_layer_{layer}"
+    
+    if verbose:
+        print(f"   🎯 Layer {layer}: {hook_point}")
+    
+    # Determine input size based on model
+    if "llama" in model_name.lower():
+        if "70b" in model_name.lower():
+            input_size = 8192  # Llama 3.1 70B hidden size
+        else:
+            input_size = 4096  # Llama 3.1 8B hidden size
+    else:
+        input_size = 768  # GPT-2 hidden size
+    
+    # Configure probe
+    probe_config = LogisticProbeConfig(
+        input_size=input_size,
+        normalize_weights=True,
+        bias=False,
+        model_name=model_name,
+        hook_point=hook_point,
+        hook_layer=layer,
+        name=probe_name
+    )
+    
+    # Configure trainer
+    trainer_config = SupervisedTrainerConfig(
+        batch_size=training_config["batch_size"],
+        learning_rate=training_config["learning_rate"],
+        num_epochs=training_config["num_epochs"],
+        patience=training_config["patience"],
+        weight_decay=0.01,
+        train_ratio=0.8,
+        handle_class_imbalance=True,
+        show_progress=verbose
+    )
+    
+    # Initialize probe
+    probe = LogisticProbe(probe_config)
+    probe.to("cuda" if torch.cuda.is_available() else "cpu")
+    
+    # Initialize trainer
+    trainer = SupervisedProbeTrainer(trainer_config)
+    
+    # Prepare data and train using the pre-collected activations
+    train_loader, val_loader = trainer.prepare_supervised_data(
+        activation_store, "target"
+    )
+    
+    history = trainer.train(probe, train_loader, val_loader)
     
     # Save probe in probity format
     probe_type_dir = output_dir / "logistic"
@@ -428,7 +528,7 @@ def run_evaluation_on_all_probes(
     
     eval_command = [
         sys.executable,
-        "probity/scripts/probe_eval.py",
+        "scripts/probe_eval.py",
         "--model_name", model_name,
         "--eval_dataset_dir", str(dataset_path),
         "--probe_dir", str(probe_dir),
@@ -455,119 +555,126 @@ def run_evaluation_on_all_probes(
         return None
 
 def main():
-    """Main training function."""
+    """Main training function with memory-efficient layer-by-layer training."""
     args = parse_args()
+    repo_root, probity_dir = setup_paths()
     
-    try:
-        # Setup
-        repo_root, probity_dir = setup_paths()
-        
-        # Determine dataset path
-        if args.dataset:
-            dataset_path = repo_root / "probity" / "data" / "NTML-datasets" / f"{args.dataset}.jsonl"
-            if not dataset_path.exists():
-                print(f"❌ Dataset not found: {dataset_path}")
-                return 1
+    print("🚀 Multi-Layer NTML Probe Training")
+    print(f"📁 Dataset: {args.dataset or args.jsonl_path}")
+    print(f"🤖 Model: {args.model_name}")
+    print(f"🎯 Layers: {args.layers}")
+    print(f"📊 Training config: {args.num_epochs} epochs, batch_size={args.batch_size}")
+    
+    # Setup output directory
+    if args.output_dir:
+        output_dir = Path(args.output_dir)
+    else:
+        output_dir = probity_dir / "trained_probes"
+    
+    output_dir.mkdir(exist_ok=True)
+    print(f"💾 Output: {output_dir}")
+    
+    # Load dataset
+    if args.dataset:
+        dataset_path = probity_dir / "data" / "NTML-datasets" / f"{args.dataset}.jsonl"
+    else:
+        dataset_path = Path(args.jsonl_path)
+    
+    if not dataset_path.exists():
+        print(f"❌ Dataset not found: {dataset_path}")
+        return
+    
+    tokenized_dataset = load_and_prepare_dataset(dataset_path, repo_root)
+    
+    # Determine layers to train
+    if args.layers == "all":
+        if args.model_name == "gpt2":
+            layers = list(range(12))
+        elif "llama" in args.model_name.lower():
+            layers = list(range(32))  # Llama 8B has 32 layers
         else:
-            dataset_path = Path(args.jsonl_path)
-            if not dataset_path.exists():
-                print(f"❌ JSONL file not found: {dataset_path}")
-                return 1
+            layers = list(range(12))  # Default
+    else:
+        layers = [int(l.strip()) for l in args.layers.split(",")]
+    
+    print(f"🎯 Training on layers: {layers}")
+    
+    # Training configuration
+    training_config = {
+        "num_epochs": args.num_epochs,
+        "batch_size": args.batch_size,
+        "learning_rate": args.learning_rate,
+        "patience": args.patience
+    }
+    
+    # Memory-efficient sequential training
+    print(f"\n🔧 Training layers sequentially (memory-efficient mode)...")
+    
+    all_histories = {}
+    all_metrics = {}
+    
+    for layer in tqdm(layers, desc="Training layers"):
+        print(f"\n🎯 Training layer {layer}...")
         
-        # Set output directory
-        output_dir = Path(args.output_dir) if args.output_dir else repo_root / "trained_probes"
-        output_dir.mkdir(parents=True, exist_ok=True)
-        
-        # Set results name
-        results_name = args.results_name or f"ntml_multilayer_{dataset_path.stem}"
-        
-        # Determine layers to train
-        if args.layers == "all":
-            # GPT-2 has 12 layers (0-11)
-            layers_to_train = list(range(12))
-        else:
-            layers_to_train = [int(x.strip()) for x in args.layers.split(",")]
-        
-        print(f"🚀 Multi-Layer NTML Probe Training")
-        print(f"📁 Dataset: {dataset_path.name}")
-        print(f"🤖 Model: {args.model_name}")
-        print(f"🎯 Layers: {layers_to_train}")
-        print(f"📊 Training config: {args.num_epochs} epochs, batch_size={args.batch_size}")
-        print(f"💾 Output: {output_dir}")
-        
-        # Load dataset
-        tokenized_dataset = load_and_prepare_dataset(dataset_path, repo_root)
-        
-        # Training configuration
-        training_config = {
-            "num_epochs": args.num_epochs,
-            "batch_size": args.batch_size,
-            "learning_rate": args.learning_rate,
-            "patience": args.patience
-        }
-        
-        # Train probes on all layers
-        print(f"\n🏋️ Training Probes Across {len(layers_to_train)} Layers")
-        print("=" * 50)
-        
-        all_histories = {}
-        all_metrics = {}
-        
-        for layer in tqdm(layers_to_train, desc="Training layers"):
-            try:
-                probe, history, metrics = train_probe_on_layer(
-                    layer=layer,
-                    tokenized_dataset=tokenized_dataset,
-                    model_name=args.model_name,
-                    training_config=training_config,
-                    output_dir=output_dir,
-                    verbose=args.verbose
-                )
-                
-                all_histories[layer] = history
-                all_metrics[layer] = metrics
-                
-            except Exception as e:
-                print(f"❌ Failed to train layer {layer}: {e}")
-                continue
-        
-        # Analyze results
-        if all_metrics:
-            detailed_results = analyze_training_results(
-                all_histories=all_histories,
-                all_metrics=all_metrics,
-                results_name=results_name,
+        try:
+            # Train probe on this layer (loads model fresh each time)
+            probe, history, metrics = train_probe_on_layer(
+                layer=layer,
+                tokenized_dataset=tokenized_dataset,
+                model_name=args.model_name,
+                training_config=training_config,
                 output_dir=output_dir,
-                plot_curves=args.plot_training_curves
+                verbose=args.verbose
             )
             
-            # Run evaluation if requested
-            if args.eval_after_training:
-                eval_results_dir = run_evaluation_on_all_probes(
-                    probe_dir=output_dir,
-                    dataset_path=dataset_path,
-                    model_name=args.model_name,
-                    results_name=results_name
-                )
+            all_histories[layer] = history
+            all_metrics[layer] = metrics
             
-            print(f"\n🎉 Multi-Layer Training Complete!")
-            print(f"📋 Summary:")
-            print(f"   • Trained {len(all_metrics)} probes successfully")
-            print(f"   • Best layer: {detailed_results['best_layers']['best_final_val_loss']['layer']}")
-            print(f"   • Best validation loss: {detailed_results['best_layers']['best_final_val_loss']['loss']:.4f}")
-            print(f"   • Results saved to: {output_dir}")
+            print(f"✅ Layer {layer} completed - Val Loss: {metrics.get('val_loss', 'N/A'):.4f}")
             
-            return 0
-        else:
-            print(f"❌ No probes trained successfully")
-            return 1
-            
-    except Exception as e:
-        print(f"❌ Error: {e}")
-        if args.verbose:
-            import traceback
-            traceback.print_exc()
-        return 1
+        except Exception as e:
+            print(f"❌ Error training layer {layer}: {e}")
+            continue
+    
+    # Generate results name
+    if args.results_name:
+        results_name = args.results_name
+    else:
+        dataset_name = dataset_path.stem
+        results_name = f"ntml_multilayer_{dataset_name}"
+    
+    # Analyze results
+    print(f"\n📊 Analyzing training results...")
+    analysis_results = analyze_training_results(
+        all_histories=all_histories,
+        all_metrics=all_metrics,
+        results_name=results_name,
+        output_dir=output_dir,
+        plot_curves=args.plot_training_curves
+    )
+    
+    # Run evaluation if requested
+    if args.eval_after_training:
+        print(f"\n🔍 Running evaluation on all trained probes...")
+        run_evaluation_on_all_probes(
+            probe_dir=output_dir,
+            dataset_path=dataset_path,
+            model_name=args.model_name,
+            results_name=results_name
+        )
+    
+    # Print summary
+    print(f"\n🎉 Multi-Layer Training Complete!")
+    print(f"📋 Summary:")
+    print(f"   • Trained {len(all_metrics)} probes successfully")
+    
+    if all_metrics:
+        best_layer = min(all_metrics.keys(), key=lambda k: all_metrics[k].get('val_loss', float('inf')))
+        best_loss = all_metrics[best_layer].get('val_loss', 'N/A')
+        print(f"   • Best layer: {best_layer}")
+        print(f"   • Best validation loss: {best_loss}")
+    
+    print(f"   • Results saved to: {output_dir}")
 
 if __name__ == "__main__":
     exit(main()) 
