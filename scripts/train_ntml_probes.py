@@ -667,7 +667,7 @@ def main():
         
         # Set default cache and output directories relative to repo root
         cache_dir = args.cache_dir or str(repo_root / "cache" / "ntml_cache")
-        output_dir = args.output_dir or str(repo_root / "trained_probes")
+        output_dir = args.output_dir or str(repo_root / "probity" / "trained_probes")
         
         print("🚀 NTML Statement-Level Probe Training")
         print(f"📁 Repository root: {repo_root}")
@@ -802,13 +802,21 @@ def main():
             
             print("✅ Training completed!")
             
-            # Save probe
+            # Save probe in probity's native format
             output_path = Path(output_dir)
             output_path.mkdir(parents=True, exist_ok=True)
             
-            probe_path = output_path / f"{probe_name}.pt"
-            probe.save(str(probe_path))
+            # Create probity-style directory structure
+            probe_type = "logistic"  # We're using LogisticProbe
+            probe_type_dir = output_path / probe_type
+            probe_type_dir.mkdir(parents=True, exist_ok=True)
+            
+            # Save as layer_X_probe.json (probity's expected format)
+            layer = args.hook_layer
+            probe_path = probe_type_dir / f"layer_{layer}_probe.json"
+            probe.save_json(str(probe_path))
             print(f"💾 Probe saved to: {probe_path}")
+            print(f"📁 Directory structure: {probe_type_dir.name}/layer_{layer}_probe.json")
             
             # Print training summary
             if history and 'val_accuracy' in history:

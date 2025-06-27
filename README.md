@@ -1,6 +1,6 @@
 # Soothcheck
 
-A project for investigating lie detection and verification in large language models.
+A project for investigating lie detection in large language models.
 
 ## Overview
 

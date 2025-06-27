@@ -5,9 +5,15 @@ from probity.datasets.base import ProbingDataset, ProbingExample, CharacterPosit
 from probity.datasets.tokenized import TokenizedProbingDataset, TokenizedProbingExample, TokenPositions
 from transformers import AutoTokenizer
 
-def load_lie_truth_dataset(json_path: str, tokenizer_name: str = "meta-llama/Llama-3.1-8B-Instruct") -> TokenizedProbingDataset:
-    """Load the lie/truth dataset from JSON format"""
-    with open(json_path, 'r') as f:
+def load_lie_truth_dataset(dataset_path: str, tokenizer_name: str = "meta-llama/Llama-3.1-8B-Instruct") -> TokenizedProbingDataset:
+    """Load dataset from JSON or JSONL format - supports both native probity and NTML formats"""
+    
+    # Check if it's a JSONL file (NTML format)
+    if dataset_path.endswith('.jsonl'):
+        return load_ntml_dataset(dataset_path, tokenizer_name)
+    
+    # Otherwise, load as native probity JSON format
+    with open(dataset_path, 'r') as f:
         data = json.load(f)
     
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_name, use_fast=True)
@@ -102,6 +108,47 @@ def load_lie_truth_dataset(json_path: str, tokenizer_name: str = "meta-llama/Lla
         add_special_tokens=False  # Chat template already adds special tokens
     )
     
+    return tokenized_dataset
+
+def load_ntml_dataset(jsonl_path: str, tokenizer_name: str = "gpt2") -> TokenizedProbingDataset:
+    """Load NTML JSONL dataset and convert to probity format"""
+    
+    # Import here to avoid circular imports
+    try:
+        import sys
+        from pathlib import Path
+        # Add the repo root to path to find probity_extensions
+        repo_root = Path(__file__).parent.parent.parent
+        sys.path.insert(0, str(repo_root))
+        from probity_extensions.conversational import ConversationalProbingDataset
+    except ImportError as e:
+        raise ImportError(f"NTML support requires probity_extensions. Error: {e}")
+    
+    print(f"Loading NTML dataset: {Path(jsonl_path).name}")
+    
+    # Load NTML conversational dataset
+    conv_dataset = ConversationalProbingDataset.from_ntml_jsonl(jsonl_path)
+    
+    # Convert to statement-level dataset
+    stmt_dataset = conv_dataset.get_statement_dataset()
+    
+    print(f"Converted to {len(stmt_dataset.examples)} statement examples")
+    
+    # Tokenize with the specified tokenizer
+    tokenizer = AutoTokenizer.from_pretrained(tokenizer_name, use_fast=True)
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+    
+    tokenized_dataset = TokenizedProbingDataset.from_probing_dataset(
+        dataset=stmt_dataset,
+        tokenizer=tokenizer,
+        padding="max_length",
+        max_length=512,
+        truncation=True,
+        add_special_tokens=True
+    )
+    
+    print(f"Tokenized dataset ready: {len(tokenized_dataset.examples)} examples")
     return tokenized_dataset
 
 def get_model_dtype(model_name: str) -> torch.dtype:
