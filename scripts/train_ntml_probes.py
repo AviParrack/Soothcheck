@@ -696,7 +696,7 @@ def main():
         
         # Set default cache and output directories relative to repo root
         cache_dir = args.cache_dir or str(repo_root / "cache" / "ntml_cache")
-        output_dir = args.output_dir or str(repo_root / "probity" / "trained_probes")
+        output_dir = args.output_dir or str(repo_root / "trained_probes")
         
         print("🚀 NTML Statement-Level Probe Training")
         print(f"📁 Repository root: {repo_root}")

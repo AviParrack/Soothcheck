@@ -31,22 +31,38 @@ class TransformerLensCollector:
         
         # Load model with quantization support if needed
         if config.load_in_8bit or config.load_in_4bit:
-            print(f"⚠️  Quantization requested but TransformerLens doesn't directly support it.")
-            print("   Loading via HuggingFace first, then converting...")
+            print(f"⚠️  Quantization requested: 8bit={config.load_in_8bit}, 4bit={config.load_in_4bit}")
+            print("   Loading via HuggingFace with proper quantization config...")
             
-            from transformers import AutoModelForCausalLM
+            from transformers import AutoModelForCausalLM, BitsAndBytesConfig
             import torch
             
             # Determine dtype
             bfloat16_models = ['llama', 'mistral', 'gemma', 'phi']
             dtype = torch.bfloat16 if any(m in config.model_name.lower() for m in bfloat16_models) else torch.float32
             
+            # Create quantization config
+            if config.load_in_4bit:
+                quantization_config = BitsAndBytesConfig(
+                    load_in_4bit=True,
+                    bnb_4bit_quant_type="nf4",  # Use NF4 (normalized float 4) for better performance
+                    bnb_4bit_use_double_quant=True,  # Double quantization saves additional memory
+                    bnb_4bit_compute_dtype=torch.bfloat16,  # Use bfloat16 for computation
+                )
+                print("   Using 4-bit NF4 quantization with double quantization")
+            elif config.load_in_8bit:
+                quantization_config = BitsAndBytesConfig(
+                    load_in_8bit=True,
+                )
+                print("   Using 8-bit quantization")
+            else:
+                quantization_config = None
+            
             # Load with quantization
             hf_model = AutoModelForCausalLM.from_pretrained(
                 config.model_name,
-                load_in_8bit=config.load_in_8bit,
-                load_in_4bit=config.load_in_4bit,
-                device_map=config.device_map if config.load_in_8bit or config.load_in_4bit else None,
+                quantization_config=quantization_config,
+                device_map=config.device_map,
                 torch_dtype=dtype,
                 low_cpu_mem_usage=config.low_cpu_mem_usage,
                 trust_remote_code=True
@@ -56,7 +72,7 @@ class TransformerLensCollector:
             self.model = HookedTransformer.from_pretrained(
                 config.model_name,
                 hf_model=hf_model,
-                device=config.device if not (config.load_in_8bit or config.load_in_4bit) else None,
+                device=None,  # Device already set by quantization
                 dtype=dtype,
                 fold_ln=False,
                 center_writing_weights=False,

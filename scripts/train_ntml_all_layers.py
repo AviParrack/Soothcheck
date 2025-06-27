@@ -475,7 +475,7 @@ def main():
                 return 1
         
         # Set output directory
-        output_dir = Path(args.output_dir) if args.output_dir else repo_root / "probity" / "trained_probes"
+        output_dir = Path(args.output_dir) if args.output_dir else repo_root / "trained_probes"
         output_dir.mkdir(parents=True, exist_ok=True)
         
         # Set results name
