@@ -38,12 +38,12 @@ echo "CUDA Version: $(nvcc --version | grep release || echo 'CUDA not found')"
 
 # 2. Clone Repository
 print_status "Cloning NTML Probity repository..."
-if [ ! -d "Jord-probity" ]; then
-    git clone https://github.com/AviParrack/Soothcheck.git Jord-probity
-    cd Jord-probity/probity
+if [ ! -d "Soothcheck" ]; then
+    git clone https://github.com/AviParrack/Soothcheck.git
+    cd Soothcheck
 else
     print_warning "Repository already exists, pulling latest changes..."
-    cd Jord-probity/probity
+    cd Soothcheck
     git pull origin main
 fi
 
@@ -234,6 +234,9 @@ except Exception as e:
 # 8. Setup Test Dataset
 print_status "Setting up test NTML dataset..."
 
+# Ensure dataset directory exists
+mkdir -p data/NTML-datasets
+
 # Check if we already have test datasets
 if [ -f "data/NTML-datasets/2T1L_2samples.jsonl" ]; then
     print_success "Found existing NTML test datasets - using those"
@@ -267,7 +270,7 @@ Run this to train your first statement-level probe on Llama 3.3 70B!
 
 import sys
 import os
-sys.path.append('/workspace/Jord-probity/probity')
+sys.path.append('/workspace/Soothcheck')
 
 def main():
     print("🚀 NTML Probing with Llama 3.3 70B Instruct Quick Start")
