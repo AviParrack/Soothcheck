@@ -477,4 +477,10 @@ echo "  - Try layers 20, 40, 60 for different representations"
 echo "  - Uses torch.bfloat16 dtype (Probity standard)"
 echo "  - Loaded via HookedTransformer.from_pretrained_no_processing()"
 
-print_success "Ready to probe Llama 3.3 70B! 🚀" 
+print_success "Ready to probe Llama 3.3 70B! 🚀"
+
+# Check all critical versions
+python -c "import transformers; print('transformers:', transformers.__version__)"
+python -c "import transformer_lens; print('transformer_lens:', transformer_lens.__version__)"
+python -c "import torch; print('torch:', torch.__version__)"
+python -c "import huggingface_hub; print('huggingface_hub:', huggingface_hub.__version__)" 
