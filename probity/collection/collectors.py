@@ -14,6 +14,12 @@ class TransformerLensConfig:
     hook_points: List[str]  # e.g. ["blocks.12.hook_resid_post"]
     batch_size: int = 32
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
+    
+    # Memory optimization parameters
+    load_in_8bit: bool = False
+    load_in_4bit: bool = False
+    low_cpu_mem_usage: bool = True
+    device_map: str = "auto"
 
 
 class TransformerLensCollector:
@@ -22,9 +28,46 @@ class TransformerLensCollector:
     def __init__(self, config: TransformerLensConfig):
         self.config = config
         print(f"Initializing collector with device: {config.device}")
-        self.model = HookedTransformer.from_pretrained_no_processing(config.model_name)
-        print(f"Moving model to device: {config.device}")
-        self.model.to(config.device)
+        
+        # Load model with quantization support if needed
+        if config.load_in_8bit or config.load_in_4bit:
+            print(f"⚠️  Quantization requested but TransformerLens doesn't directly support it.")
+            print("   Loading via HuggingFace first, then converting...")
+            
+            from transformers import AutoModelForCausalLM
+            import torch
+            
+            # Determine dtype
+            bfloat16_models = ['llama', 'mistral', 'gemma', 'phi']
+            dtype = torch.bfloat16 if any(m in config.model_name.lower() for m in bfloat16_models) else torch.float32
+            
+            # Load with quantization
+            hf_model = AutoModelForCausalLM.from_pretrained(
+                config.model_name,
+                load_in_8bit=config.load_in_8bit,
+                load_in_4bit=config.load_in_4bit,
+                device_map=config.device_map if config.load_in_8bit or config.load_in_4bit else None,
+                torch_dtype=dtype,
+                low_cpu_mem_usage=config.low_cpu_mem_usage,
+                trust_remote_code=True
+            )
+            
+            # Convert to HookedTransformer
+            self.model = HookedTransformer.from_pretrained(
+                config.model_name,
+                hf_model=hf_model,
+                device=config.device if not (config.load_in_8bit or config.load_in_4bit) else None,
+                dtype=dtype,
+                fold_ln=False,
+                center_writing_weights=False,
+                center_unembed=False,
+            )
+            print(f"✅ Model loaded with quantization: 8bit={config.load_in_8bit}, 4bit={config.load_in_4bit}")
+        else:
+            # Standard loading
+            self.model = HookedTransformer.from_pretrained_no_processing(config.model_name)
+            print(f"Moving model to device: {config.device}")
+            self.model.to(config.device)
 
     @staticmethod
     def get_layer_from_hook_point(hook_point: str) -> int:

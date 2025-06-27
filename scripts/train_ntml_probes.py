@@ -184,6 +184,35 @@ Examples:
         help="Training/validation split ratio (default: 0.8)"
     )
     
+    # Memory optimization arguments
+    parser.add_argument(
+        "--load_in_8bit",
+        action="store_true",
+        help="Use 8-bit quantization for memory efficiency (recommended for 70B models)"
+    )
+    parser.add_argument(
+        "--load_in_4bit",
+        action="store_true",
+        help="Use 4-bit quantization for extreme memory efficiency"
+    )
+    parser.add_argument(
+        "--gradient_checkpointing",
+        action="store_true",
+        help="Enable gradient checkpointing to save memory"
+    )
+    parser.add_argument(
+        "--low_cpu_mem_usage",
+        action="store_true",
+        default=True,
+        help="Use low CPU memory usage during model loading (default: True)"
+    )
+    parser.add_argument(
+        "--device_map",
+        type=str,
+        default="auto",
+        help="Device mapping strategy (default: auto)"
+    )
+    
     # Output arguments
     parser.add_argument(
         "--cache_dir",
@@ -675,6 +704,23 @@ def main():
         print(f"🤖 Model: {args.model_name}")
         print(f"🎯 Hook Point: {args.hook_point}")
         
+        # Memory optimization info
+        if args.load_in_8bit:
+            print("🔧 Memory optimization: 8-bit quantization enabled")
+        elif args.load_in_4bit:
+            print("🔧 Memory optimization: 4-bit quantization enabled")
+        if args.gradient_checkpointing:
+            print("🔧 Memory optimization: Gradient checkpointing enabled")
+        
+        # Memory warnings for large models
+        if "70b" in args.model_name.lower():
+            print("⚠️  Large model detected (70B parameters)")
+            print("   💡 Recommendations:")
+            print("   • Use --load_in_8bit for GPUs with 80GB+ VRAM")
+            print("   • Use --load_in_4bit for GPUs with 40-80GB VRAM")
+            print("   • Reduce --batch_size if you encounter OOM errors")
+            print("   • Consider --gradient_checkpointing for memory efficiency")
+        
         # Import here after path setup
         from transformers import AutoTokenizer
         from probity.datasets.tokenized import TokenizedProbingDataset
@@ -748,8 +794,34 @@ def main():
         if args.statement_idx is not None:
             probe_name += f"_stmt{args.statement_idx}"
         
+        # Determine model hidden size
+        def get_model_hidden_size(model_name: str) -> int:
+            """Get the hidden size for different model architectures"""
+            model_lower = model_name.lower()
+            if "gpt2" in model_lower:
+                return 768
+            elif "llama" in model_lower:
+                if "70b" in model_lower or "65b" in model_lower:
+                    return 8192  # Llama 70B
+                elif "13b" in model_lower:
+                    return 5120  # Llama 13B
+                elif "7b" in model_lower or "8b" in model_lower:
+                    return 4096  # Llama 7B/8B
+                else:
+                    return 4096  # Default for smaller Llama models
+            elif "mistral" in model_lower:
+                return 4096
+            elif "gemma" in model_lower:
+                return 3072 if "2b" in model_lower else 2048
+            else:
+                # Fallback: try to infer from model name or use reasonable default
+                return 4096
+        
+        input_size = get_model_hidden_size(args.model_name)
+        print(f"🔍 Detected model hidden size: {input_size}")
+        
         probe_config = LogisticProbeConfig(
-            input_size=768 if "gpt2" in args.model_name else 768,  # TODO: Get actual model size
+            input_size=input_size,
             normalize_weights=True,
             bias=False,
             model_name=args.model_name,
@@ -779,7 +851,11 @@ def main():
             position_key="target",  # Probe at statement positions
             model_name=args.model_name,
             hook_points=[args.hook_point],
-            cache_dir=cache_dir
+            cache_dir=cache_dir,
+            load_in_8bit=args.load_in_8bit,
+            load_in_4bit=args.load_in_4bit,
+            low_cpu_mem_usage=args.low_cpu_mem_usage,
+            device_map=args.device_map
         )
         
         # DEBUG: Print pipeline configuration

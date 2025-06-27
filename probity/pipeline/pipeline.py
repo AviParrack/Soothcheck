@@ -31,6 +31,12 @@ class ProbePipelineConfig:
     hook_points: Optional[List[str]] = None
     activation_batch_size: int = 32
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
+    
+    # Memory optimization parameters
+    load_in_8bit: bool = False
+    load_in_4bit: bool = False
+    low_cpu_mem_usage: bool = True
+    device_map: str = "auto"
 
 
 class ProbePipeline(Generic[C, P]):
@@ -66,6 +72,10 @@ class ProbePipeline(Generic[C, P]):
                 hook_points=self.config.hook_points,
                 batch_size=self.config.activation_batch_size,
                 device=self.config.device,
+                load_in_8bit=self.config.load_in_8bit,
+                load_in_4bit=self.config.load_in_4bit,
+                low_cpu_mem_usage=self.config.low_cpu_mem_usage,
+                device_map=self.config.device_map,
             )
         )
 

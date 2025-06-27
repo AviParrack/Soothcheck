@@ -121,6 +121,7 @@ python scripts/train_ntml_probes.py \
     --dataset llama33_test \
     --model_name meta-llama/Llama-3.3-70B-Instruct \
     --hook_point blocks.40.hook_resid_pre \
+    --batch_size 4 \
     --debug
 
 # For RTX 6000 Ada 48GB (8-bit quantization):
@@ -129,13 +130,27 @@ python scripts/train_ntml_probes.py \
     --model_name meta-llama/Llama-3.3-70B-Instruct \
     --hook_point blocks.40.hook_resid_pre \
     --load_in_8bit \
+    --batch_size 2 \
+    --debug
+
+# For smaller GPUs (4-bit quantization):
+python scripts/train_ntml_probes.py \
+    --dataset llama33_test \
+    --model_name meta-llama/Llama-3.3-70B-Instruct \
+    --hook_point blocks.40.hook_resid_pre \
+    --load_in_4bit \
+    --batch_size 1 \
     --debug
 ```
 
 ## 🎯 Quick Start Commands
 
-### Check System Status
+### Test Complete Setup
 ```bash
+# Comprehensive test (includes model loading test)
+python test_llama70b_setup.py
+
+# Quick environment check (no model loading)
 python check_llama33_environment.py
 ```
 
@@ -234,11 +249,16 @@ python scripts/train_ntml_probes.py \
 
 **1. CUDA Out of Memory**
 ```bash
-# Use quantization
---load_in_8bit  # or --load_in_4bit for extreme memory constraints
+# Use quantization (now properly supported!)
+--load_in_8bit      # Recommended for 80GB+ GPUs
+--load_in_4bit      # For 40-80GB GPUs
 
 # Reduce batch size
 --batch_size 1
+
+# Enable memory optimization
+--low_cpu_mem_usage
+--device_map auto
 
 # Set environment variable
 export PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:512

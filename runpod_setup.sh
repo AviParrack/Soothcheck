@@ -447,7 +447,12 @@ EOF
 
 chmod +x check_llama33_environment.py
 
-# 12. Final Setup
+# 12. Create Comprehensive Test Script
+print_status "Creating comprehensive test script..."
+cp test_llama70b_setup.py ./
+chmod +x test_llama70b_setup.py
+
+# 13. Final Setup
 print_status "Running environment check..."
 python check_llama33_environment.py
 
