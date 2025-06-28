@@ -82,9 +82,9 @@ class TransformerLensCollector:
             )
             print(f"✅ Model loaded with quantization: 8bit={config.load_in_8bit}, 4bit={config.load_in_4bit}")
         else:
-            # Standard loading - but use HuggingFace path for large models with device_map
+            # Standard loading - use HookedTransformer's native device management
             if config.device_map == "auto":
-                print("Loading large model with device_map='auto' for GPU distribution...")
+                print("Loading large model with HookedTransformer's native device management...")
                 
                 # Clear GPU cache before loading
                 if torch.cuda.is_available():
@@ -94,41 +94,18 @@ class TransformerLensCollector:
                 bfloat16_models = ['llama', 'mistral', 'gemma', 'phi']
                 dtype = torch.bfloat16 if any(m in config.model_name.lower() for m in bfloat16_models) else torch.float32
                 
-                # Load with HuggingFace first for proper device distribution
-                hf_model = AutoModelForCausalLM.from_pretrained(
-                    config.model_name,
-                    device_map="auto",
-                    torch_dtype=dtype,
-                    low_cpu_mem_usage=True,
-                )
-                
-                # Convert to HookedTransformer with device distribution preservation
-                print("   Converting to HookedTransformer while preserving device distribution...")
-                
-                # Create HookedTransformer without moving to device
+                # Use HookedTransformer's native device_map and quantization
                 self.model = HookedTransformer.from_pretrained(
                     config.model_name,
-                    hf_model=hf_model,
-                    device=None,  # Don't move to device yet
-                    dtype=dtype,
-                    fold_ln=False,
-                    center_writing_weights=False,
-                    center_unembed=False,
+                    device_map="auto",  # Let HookedTransformer handle device placement
+                    torch_dtype=dtype,
+                    load_in_4bit=True,  # Use 4-bit quantization to fit on GPU
+                    bnb_4bit_quant_type="nf4",
+                    bnb_4bit_use_double_quant=True,
+                    bnb_4bit_compute_dtype=torch.bfloat16,
                 )
                 
-                # Monkey patch the move_model_modules_to_device method to do nothing
-                # This prevents HookedTransformer from trying to move everything to one device
-                original_move_method = self.model.move_model_modules_to_device
-                def no_move_method():
-                    print("   Skipping device movement to preserve distribution")
-                    return
-                
-                self.model.move_model_modules_to_device = no_move_method
-                
-                # Set device to None to prevent further device operations
-                self.model.cfg.device = None
-                
-                print(f"✅ Large model loaded with device_map='auto' distribution preserved")
+                print(f"✅ Large model loaded with HookedTransformer's device management and 4-bit quantization")
             else:
                 # Standard loading for smaller models
                 self.model = HookedTransformer.from_pretrained_no_processing(config.model_name)
