@@ -129,6 +129,21 @@ class TransformerLensCollector:
                 # This allows HookedTransformer's device utilities to work properly
                 self.model.cfg.device = "cuda:0"
                 
+                # Debug: Check device distribution
+                print("Device distribution:")
+                if hasattr(self.model, 'embed') and hasattr(self.model.embed, 'W_E'):
+                    print(f"  Embedding: {self.model.embed.W_E.device}")
+                for name, param in self.model.named_parameters():
+                    if 'embed' in name.lower():
+                        print(f"  {name}: {param.device}")
+                        break
+                
+                # If embedding is on CPU, move it to GPU
+                if hasattr(self.model, 'embed') and hasattr(self.model.embed, 'W_E'):
+                    if self.model.embed.W_E.device.type == 'cpu':
+                        print("⚠️  Moving embedding layer from CPU to cuda:0")
+                        self.model.embed = self.model.embed.to('cuda:0')
+                
                 print(f"✅ Large model loaded and distributed across {torch.cuda.device_count()} GPUs")
             else:
                 # Standard loading for smaller models
@@ -193,12 +208,17 @@ class TransformerLensCollector:
                 batch = dataset.get_batch_tensors(batch_indices)
 
                 # Run model with caching using the actual model
-                # For multi-GPU models, input should go to the device of the first layer
-                if hasattr(actual_model, 'cfg') and actual_model.cfg.device:
+                # For multi-GPU models, input should go to the device of the embedding layer
+                if hasattr(actual_model, 'embed') and hasattr(actual_model.embed, 'W_E'):
+                    # Use the device of the embedding layer
+                    input_device = actual_model.embed.W_E.device
+                    print(f"Debug: Using embedding device: {input_device}")
+                elif hasattr(actual_model, 'cfg') and actual_model.cfg.device:
                     input_device = actual_model.cfg.device
                 else:
                     # Fallback: find device of first model parameter
                     input_device = next(actual_model.parameters()).device
+                    print(f"Debug: Using fallback device: {input_device}")
                 
                 _, cache = actual_model.run_with_cache(
                     batch["input_ids"].to(input_device),
