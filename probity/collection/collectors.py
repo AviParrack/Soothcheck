@@ -159,6 +159,15 @@ class TransformerLensCollector:
 
         # Create ActivationCache objects
         return {
-            hook: ActivationStore.from_cache_list(activations, dataset)
+            hook: ActivationStore(
+                raw_activations=torch.cat(activations, dim=0),
+                hook_point=hook,
+                example_indices=torch.arange(len(dataset.examples)),
+                sequence_lengths=torch.tensor(dataset.get_token_lengths()),
+                hidden_size=activations[0].shape[-1],
+                dataset=dataset,
+                labels=torch.tensor([ex.label for ex in dataset.examples]),
+                label_texts=[ex.label_text for ex in dataset.examples],
+            )
             for hook, activations in all_activations.items()
         }
