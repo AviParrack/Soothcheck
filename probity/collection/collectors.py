@@ -109,10 +109,7 @@ class TransformerLensCollector:
         except (IndexError, ValueError):
             raise ValueError(f"Could not extract layer from hook point: {hook_point}")
 
-    def collect(
-        self,
-        dataset: TokenizedProbingDataset,
-    ) -> Dict[str, ActivationStore]:
+    def collect(self, dataset: TokenizedProbingDataset) -> Dict[str, ActivationStore]:
         """Collect activations for each hook point.
 
         Returns:
@@ -122,6 +119,14 @@ class TransformerLensCollector:
 
         # Set model to evaluation mode
         self.model.eval()
+
+        # Handle DataParallel wrapping - get the underlying model for run_with_cache
+        if hasattr(self.model, 'module') and hasattr(self.model.module, 'run_with_cache'):
+            # Model is wrapped in DataParallel, use the underlying model
+            actual_model = self.model.module
+        else:
+            # Model is not wrapped, use directly
+            actual_model = self.model
 
         # Get maximum layer needed
         max_layer = max(
@@ -138,8 +143,8 @@ class TransformerLensCollector:
                 # Get batch tensors
                 batch = dataset.get_batch_tensors(batch_indices)
 
-                # Run model with caching
-                _, cache = self.model.run_with_cache(
+                # Run model with caching using the actual model
+                _, cache = actual_model.run_with_cache(
                     batch["input_ids"].to(self.config.device),
                     names_filter=self.config.hook_points,
                     return_cache_object=True,
@@ -154,15 +159,6 @@ class TransformerLensCollector:
 
         # Create ActivationCache objects
         return {
-            hook: ActivationStore(
-                raw_activations=torch.cat(activations, dim=0),
-                hook_point=hook,
-                example_indices=torch.arange(len(dataset.examples)),
-                sequence_lengths=torch.tensor(dataset.get_token_lengths()),
-                hidden_size=activations[0].shape[-1],
-                dataset=dataset,
-                labels=torch.tensor([ex.label for ex in dataset.examples]),
-                label_texts=[ex.label_text for ex in dataset.examples],
-            )
+            hook: ActivationStore.from_cache_list(activations, dataset)
             for hook, activations in all_activations.items()
         }
