@@ -1,7 +1,8 @@
 import torch
 from dataclasses import dataclass
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Union, Any
 from transformer_lens import HookedTransformer
+from transformers import AutoModelForCausalLM
 from probity.datasets.tokenized import TokenizedProbingDataset
 from probity.collection.activation_store import ActivationStore
 from probity.utils.multigpu import MultiGPUConfig, wrap_model_for_multigpu
@@ -84,33 +85,52 @@ class TransformerLensCollector:
         else:
             # Standard loading - but use HuggingFace path for large models with device_map
             if config.device_map == "auto":
-                print(f"Loading large model with device_map='auto' for GPU distribution...")
-                from transformers import AutoModelForCausalLM
-                import torch
+                print("Loading large model with device_map='auto' for GPU distribution...")
+                
+                # Clear GPU cache before loading
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
                 
                 # Determine dtype for Llama models
                 bfloat16_models = ['llama', 'mistral', 'gemma', 'phi']
                 dtype = torch.bfloat16 if any(m in config.model_name.lower() for m in bfloat16_models) else torch.float32
                 
-                # Load with HuggingFace first for proper device mapping
+                # Load with HuggingFace first for proper device distribution
                 hf_model = AutoModelForCausalLM.from_pretrained(
                     config.model_name,
-                    device_map=config.device_map,
+                    device_map="auto",
                     torch_dtype=dtype,
-                    low_cpu_mem_usage=config.low_cpu_mem_usage,
-                    trust_remote_code=True
+                    low_cpu_mem_usage=True,
                 )
                 
                 # Convert to HookedTransformer
-                self.model = HookedTransformer.from_pretrained(
-                    config.model_name,
-                    hf_model=hf_model,
-                    device=None,  # Device already set by device_map
-                    dtype=dtype,
-                    fold_ln=False,
-                    center_writing_weights=False,
-                    center_unembed=False,
-                )
+                try:
+                    self.model = HookedTransformer.from_pretrained(
+                        config.model_name,
+                        hf_model=hf_model,
+                        device=None,  # Device already set by device_map
+                        dtype=dtype,
+                        fold_ln=False,
+                        center_writing_weights=False,
+                        center_unembed=False,
+                        device_map=config.device_map,  # Pass device_map to maintain distribution
+                    )
+                except TypeError:
+                    # If HookedTransformer doesn't support device_map, load without it
+                    # and manually preserve the device distribution
+                    print("   HookedTransformer doesn't support device_map, preserving distribution...")
+                    self.model = HookedTransformer.from_pretrained(
+                        config.model_name,
+                        hf_model=hf_model,
+                        device=None,  # Device already set by device_map
+                        dtype=dtype,
+                        fold_ln=False,
+                        center_writing_weights=False,
+                        center_unembed=False,
+                    )
+                    # Disable automatic device movement
+                    self.model.cfg.device = None
+                
                 print(f"✅ Large model loaded with device_map='auto' distribution")
             else:
                 # Standard loading for smaller models
