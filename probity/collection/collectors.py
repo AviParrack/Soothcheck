@@ -125,8 +125,9 @@ class TransformerLensCollector:
                     center_unembed=False,
                 )
                 
-                # Set device to None to prevent further device operations
-                self.model.cfg.device = None
+                # Set device to cuda:0 for device utilities while preserving distribution
+                # This allows HookedTransformer's device utilities to work properly
+                self.model.cfg.device = "cuda:0"
                 
                 print(f"✅ Large model loaded and distributed across {torch.cuda.device_count()} GPUs")
             else:
@@ -192,8 +193,15 @@ class TransformerLensCollector:
                 batch = dataset.get_batch_tensors(batch_indices)
 
                 # Run model with caching using the actual model
+                # For multi-GPU models, input should go to the device of the first layer
+                if hasattr(actual_model, 'cfg') and actual_model.cfg.device:
+                    input_device = actual_model.cfg.device
+                else:
+                    # Fallback: find device of first model parameter
+                    input_device = next(actual_model.parameters()).device
+                
                 _, cache = actual_model.run_with_cache(
-                    batch["input_ids"].to(self.config.device),
+                    batch["input_ids"].to(input_device),
                     names_filter=self.config.hook_points,
                     return_cache_object=True,
                     stop_at_layer=max_layer + 1
