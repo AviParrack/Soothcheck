@@ -198,14 +198,18 @@ class TransformerLensCollector:
             for hook in self.config.hook_points
         )
 
+        # Get global max length to ensure consistent tensor shapes
+        global_max_length = dataset.get_max_sequence_length()
+        print(f"Debug: Global max sequence length: {global_max_length}")
+
         # Process in batches
         with torch.no_grad():  # Disable gradient computation for determinism
             for batch_start in range(0, len(dataset.examples), self.config.batch_size):
                 batch_end = min(batch_start + self.config.batch_size, len(dataset.examples))
                 batch_indices = list(range(batch_start, batch_end))
 
-                # Get batch tensors
-                batch = dataset.get_batch_tensors(batch_indices)
+                # Get batch tensors with global padding
+                batch = self._get_batch_with_global_padding(dataset, batch_indices, global_max_length)
 
                 # Run model with caching using the actual model
                 # For multi-GPU models, input should go to the device of the embedding layer
@@ -247,3 +251,74 @@ class TransformerLensCollector:
             )
             for hook, activations in all_activations.items()
         }
+
+    def _get_batch_with_global_padding(self, dataset, indices, global_max_length):
+        """Get batch tensors with global padding to ensure consistent shapes."""
+        examples = [dataset.examples[i] for i in indices]
+        
+        # Prepare tensors with global padding
+        input_ids = []
+        attention_mask = []
+        positions = {pt: [] for pt in dataset.position_types}
+        
+        # Check padding direction
+        is_left_padding = dataset.tokenization_config.padding_side == "left"
+        pad_token = dataset.tokenization_config.pad_token_id or 0
+        
+        for ex in examples:
+            seq_len = len(ex.tokens)
+            padding_length = global_max_length - seq_len
+            
+            if is_left_padding:
+                # Left padding
+                padded_tokens = [pad_token] * padding_length + ex.tokens
+                input_ids.append(padded_tokens)
+                
+                if ex.attention_mask is not None:
+                    padded_mask = [0] * padding_length + ex.attention_mask
+                    attention_mask.append(padded_mask)
+                else:
+                    # Create attention mask if not present
+                    padded_mask = [0] * padding_length + [1] * seq_len
+                    attention_mask.append(padded_mask)
+            else:
+                # Right padding
+                padded_tokens = ex.tokens + [pad_token] * padding_length
+                input_ids.append(padded_tokens)
+                
+                if ex.attention_mask is not None:
+                    padded_mask = ex.attention_mask + [0] * padding_length
+                    attention_mask.append(padded_mask)
+                else:
+                    # Create attention mask if not present
+                    padded_mask = [1] * seq_len + [0] * padding_length
+                    attention_mask.append(padded_mask)
+            
+            # Add positions for each position type
+            for pt in dataset.position_types:
+                if ex.token_positions is not None and pt in ex.token_positions.keys():
+                    token_pos = ex.token_positions[pt]
+                    
+                    # Adjust positions for left padding
+                    if is_left_padding:
+                        if isinstance(token_pos, int):
+                            adjusted_pos = token_pos + padding_length
+                            positions[pt].append(adjusted_pos)
+                        else:  # List of positions
+                            adjusted_pos = [pos + padding_length for pos in token_pos]
+                            positions[pt].append(adjusted_pos)
+                    else:
+                        positions[pt].append(token_pos)
+                else:
+                    positions[pt].append(0)
+        
+        # Convert to tensors
+        batch = {
+            "input_ids": torch.tensor(input_ids),
+            "attention_mask": torch.tensor(attention_mask),
+            "positions": {
+                pt: torch.tensor(positions[pt]) for pt in dataset.position_types
+            },
+        }
+        
+        return batch
