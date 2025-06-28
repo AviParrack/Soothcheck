@@ -96,15 +96,16 @@ print('All imports successful!')
 "
 
 # 8. Test GPU memory
-if torch.cuda.is_available(); then
-    print_status "Testing GPU memory..."
-    python -c "
+print_status "Testing GPU memory..."
+python -c "
 import torch
-for i in range(torch.cuda.device_count()):
-    torch.cuda.set_device(i)
-    print(f'Device {i} memory: {torch.cuda.get_device_properties(i).total_memory / 1e9:.1f} GB')
+if torch.cuda.is_available():
+    for i in range(torch.cuda.device_count()):
+        torch.cuda.set_device(i)
+        print(f'Device {i} memory: {torch.cuda.get_device_properties(i).total_memory / 1e9:.1f} GB')
+else:
+    print('CUDA not available')
 "
-fi
 
 print_success "🎉 Setup complete!"
 print_status "To activate the environment in future sessions:"

@@ -2,6 +2,7 @@
 """
 Minimal test script for NTML probe training with GPT-2.
 Uses the smallest NTML dataset (2T1L_2samples.jsonl) for quick iteration.
+Now with multi-GPU support enabled!
 """
 
 import torch
@@ -17,31 +18,24 @@ from probity.datasets.tokenized import TokenizedProbingDataset
 from probity.probes import LogisticProbe, LogisticProbeConfig
 from probity.training.trainer import SupervisedProbeTrainer, SupervisedTrainerConfig
 from probity.pipeline.pipeline import ProbePipeline, ProbePipelineConfig
+from probity.utils.multigpu import MultiGPUConfig
 from transformers import AutoTokenizer
 
 def test_ntml_probe_training():
-    """Test NTML probe training with GPT-2 on minimal dataset."""
-    print("=== NTML Probe Training Test with GPT-2 ===\n")
+    """Test NTML probe training with GPT-2 and multi-GPU support"""
+    print("=== Testing NTML Probe Training with GPT-2 (Multi-GPU) ===\n")
     
     # 1. Load NTML dataset
     print("1. Loading NTML dataset...")
-    ntml_dataset = ConversationalProbingDataset.from_ntml_jsonl(
+    ntml_dataset = ConversationalProbingDataset.from_jsonl(
         "data/NTML-datasets/2T1L_2samples.jsonl"
     )
-    print(f"   Loaded {len(ntml_dataset.examples)} conversations")
+    print(f"   Loaded {len(ntml_dataset)} examples")
     
-    # Show dataset summary
-    summary = ntml_dataset.get_conversation_summary()
-    print(f"   Dataset summary: {summary}")
-    
-    # 2. Convert to statement-level dataset (all statements as separate examples)
-    print("\n2. Converting to statement-level dataset...")
-    statement_dataset = ntml_dataset.get_statement_dataset()  # None = all statements
-    print(f"   Created {len(statement_dataset.examples)} statement examples")
-    
-    # Show a few examples
-    for i, ex in enumerate(statement_dataset.examples[:3]):
-        print(f"   Example {i}: '{ex.text[:100]}...' (Label: {ex.label})")
+    # 2. Convert to statement-level examples
+    print("\n2. Converting to statement-level examples...")
+    statement_dataset = ntml_dataset.to_statement_level()
+    print(f"   Created {len(statement_dataset)} statement-level examples")
     
     # 3. Tokenize with GPT-2
     print("\n3. Tokenizing with GPT-2...")
@@ -49,63 +43,57 @@ def test_ntml_probe_training():
     tokenizer.pad_token = tokenizer.eos_token
     
     tokenized_dataset = TokenizedProbingDataset.from_probing_dataset(
-        dataset=statement_dataset,
-        tokenizer=tokenizer,
-        padding=True,
-        max_length=128,
-        add_special_tokens=True,
+        statement_dataset, 
+        tokenizer, 
+        max_length=128
     )
-    print(f"   Tokenized dataset size: {len(tokenized_dataset.examples)}")
+    print(f"   Tokenized dataset: {len(tokenized_dataset)} examples")
     
-    # 4. Configure probe and trainer
-    print("\n4. Configuring probe and trainer...")
-    model_name = "gpt2"
-    hook_point = "blocks.7.hook_resid_pre"
+    # 4. Configure multi-GPU
+    print("\n4. Configuring multi-GPU...")
+    multi_gpu_config = MultiGPUConfig(
+        enabled=True,
+        backend="DataParallel",
+        device_ids=[0, 1]  # Use both GPUs
+    )
+    print(f"   Multi-GPU enabled: {multi_gpu_config.enabled}")
+    print(f"   Backend: {multi_gpu_config.backend}")
+    print(f"   Device IDs: {multi_gpu_config.device_ids}")
     
+    # 5. Configure probe and trainer
+    print("\n5. Configuring probe and trainer...")
     probe_config = LogisticProbeConfig(
         input_size=768,  # GPT-2 hidden size
-        normalize_weights=True,
-        bias=False,
-        model_name=model_name,
-        hook_point=hook_point,
-        hook_layer=7,
-        name="ntml_truth_probe",
+        device="cuda"
     )
     
     trainer_config = SupervisedTrainerConfig(
-        batch_size=2,  # Small batch size for minimal dataset
+        device="cuda",
+        batch_size=16,  # Smaller batch size for multi-GPU
+        num_epochs=5,
         learning_rate=1e-3,
-        num_epochs=5,  # Few epochs for quick test
-        weight_decay=0.01,
-        train_ratio=0.8,
-        handle_class_imbalance=True,
         show_progress=True,
-        device="cpu",  # Use CPU for quick test
+        multi_gpu=multi_gpu_config
     )
     
-    # 5. Create pipeline
-    print("\n5. Creating pipeline...")
+    # 6. Create and run pipeline
+    print("\n6. Creating and running pipeline...")
     pipeline_config = ProbePipelineConfig(
         dataset=tokenized_dataset,
         probe_cls=LogisticProbe,
         probe_config=probe_config,
         trainer_cls=SupervisedProbeTrainer,
         trainer_config=trainer_config,
-        position_key="target",  # Use the statement position key
-        model_name=model_name,
-        hook_points=[hook_point],
-        cache_dir="./test_ntml_cache",
+        position_key="statement_end",
+        model_name="gpt2",
+        hook_points=["blocks.7.hook_resid_post"],  # Middle layer
+        activation_batch_size=16,
+        device="cuda",
+        multi_gpu=multi_gpu_config
     )
     
-    # 6. Train the probe
-    print("\n6. Training probe...")
     pipeline = ProbePipeline(pipeline_config)
     probe, training_history = pipeline.run()
-    
-    print(f"   Training completed!")
-    print(f"   Final train loss: {training_history['train_loss'][-1]:.4f}")
-    if 'val_loss' in training_history:
-        print(f"   Final val loss: {training_history['val_loss'][-1]:.4f}")
     
     # 7. Test the probe
     print("\n7. Testing probe...")
@@ -123,25 +111,30 @@ def test_ntml_probe_training():
             plt.plot(training_history["val_loss"], label="Validation Loss")
         plt.xlabel("Epoch")
         plt.ylabel("Loss")
-        plt.title("Probe Training History (NTML, GPT-2)")
+        plt.title("Probe Training History (Multi-GPU)")
         plt.legend()
-        plt.tight_layout()
+        plt.grid(True)
         plt.show()
     except ImportError:
-        print("matplotlib not available, skipping training history plot.")
+        print("   Matplotlib not available, skipping plot")
     
     # 8. Save the probe
     print("\n8. Saving probe...")
-    probe.save("./test_ntml_probe.pt")
-    print("   Probe saved to ./test_ntml_probe.pt")
+    # Save in probity's standard format for evaluation
+    probe_dir = Path("trained_probes/logistic")
+    probe_dir.mkdir(parents=True, exist_ok=True)
     
-    # Cleanup
-    import shutil
-    if os.path.exists("./test_ntml_cache"):
-        shutil.rmtree("./test_ntml_cache")
+    # Save as .pt file (our format)
+    probe.save("test_ntml_probe.pt")
+    print("   Probe saved to test_ntml_probe.pt")
     
-    print("\n=== Test completed successfully! ===")
-    print("You can now use this probe for inference on new NTML conversations.")
+    # Save as .json file (probity's evaluation format)
+    probe.save_json(str(probe_dir / "layer_7_probe.json"))
+    print("   Probe saved to trained_probes/logistic/layer_7_probe.json (for evaluation)")
+    
+    print("\n✅ Multi-GPU NTML probe training completed successfully!")
+    print("\nTo evaluate using probity's built-in system:")
+    print("python scripts/probe_eval.py --model_name gpt2 --eval_dataset_dir data/NTML-datasets --probe_dir trained_probes --results_save_dir evaluation_results")
 
 if __name__ == "__main__":
     test_ntml_probe_training() 
