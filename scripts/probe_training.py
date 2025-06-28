@@ -10,8 +10,6 @@ import hashlib
 
 from probity.collection.activation_store import ActivationStore
 
-from utils import load_lie_truth_dataset, get_model_dtype
-
 from probity.training.configs import (
     get_probe_config,
     get_probe_class,
