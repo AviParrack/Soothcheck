@@ -82,26 +82,50 @@ class TransformerLensCollector:
             )
             print(f"✅ Model loaded with quantization: 8bit={config.load_in_8bit}, 4bit={config.load_in_4bit}")
         else:
-            # Standard loading - use HookedTransformer's native device_map
+            # Standard loading - use 8-bit quantization for large models to distribute across GPUs
             if config.device_map == "auto":
-                print("Loading large model with HookedTransformer's native device_map...")
+                print("Loading large model with 8-bit quantization for multi-GPU distribution...")
                 
                 # Clear GPU cache before loading
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
                 
+                # Use the proven quantization path with 8-bit
+                config.load_in_8bit = True
+                config.load_in_4bit = False
+                
                 # Determine dtype for Llama models
                 bfloat16_models = ['llama', 'mistral', 'gemma', 'phi']
                 dtype = torch.bfloat16 if any(m in config.model_name.lower() for m in bfloat16_models) else torch.float32
                 
-                # Use HookedTransformer's native device_map
-                self.model = HookedTransformer.from_pretrained_no_processing(
+                # Create quantization config
+                from transformers import BitsAndBytesConfig
+                quantization_config = BitsAndBytesConfig(
+                    load_in_8bit=True,
+                )
+                print("   Using 8-bit quantization for memory efficiency")
+                
+                # Load with quantization
+                hf_model = AutoModelForCausalLM.from_pretrained(
                     config.model_name,
-                    device_map="auto",  # Let HookedTransformer handle multi-GPU distribution
+                    quantization_config=quantization_config,
+                    device_map=config.device_map,
                     torch_dtype=dtype,
+                    low_cpu_mem_usage=config.low_cpu_mem_usage,
+                    trust_remote_code=True
                 )
                 
-                print(f"✅ Large model loaded with HookedTransformer's device_map across {torch.cuda.device_count()} GPUs")
+                # Convert to HookedTransformer
+                self.model = HookedTransformer.from_pretrained(
+                    config.model_name,
+                    hf_model=hf_model,
+                    device=None,  # Device already set by quantization
+                    dtype=dtype,
+                    fold_ln=False,
+                    center_writing_weights=False,
+                    center_unembed=False,
+                )
+                print(f"✅ Large model loaded with 8-bit quantization and distributed across {torch.cuda.device_count()} GPUs")
             else:
                 # Standard loading for smaller models
                 self.model = HookedTransformer.from_pretrained_no_processing(config.model_name)
