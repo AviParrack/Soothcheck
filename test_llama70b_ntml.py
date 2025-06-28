@@ -80,7 +80,7 @@ def test_llama70b_ntml():
     )
     
     trainer_config = SupervisedTrainerConfig(
-        batch_size=1,  # Very small batch size for 70B model
+        batch_size=2,  # Batch size 2 for Llama 70B model
         learning_rate=1e-3,
         num_epochs=3,  # Few epochs for quick test
         weight_decay=0.01,
@@ -91,8 +91,8 @@ def test_llama70b_ntml():
         multi_gpu=multi_gpu_config
     )
     
-    # 6. Create pipeline with quantization
-    print("\n6. Creating pipeline with quantization...")
+    # 6. Create pipeline (no quantization)
+    print("\n6. Creating pipeline (no quantization)...")
     pipeline_config = ProbePipelineConfig(
         dataset=tokenized_dataset,
         probe_cls=LogisticProbe,
@@ -104,9 +104,6 @@ def test_llama70b_ntml():
         hook_points=[hook_point],
         cache_dir="./test_llama70b_cache",
         device="cuda",
-        load_in_8bit=True,  # Use 8-bit quantization for memory efficiency
-        load_in_4bit=False,
-        low_cpu_mem_usage=True,
         device_map="auto",  # Let the library handle device mapping
         multi_gpu=multi_gpu_config
     )
@@ -115,6 +112,7 @@ def test_llama70b_ntml():
     print("\n7. Training probe...")
     print("   Note: This will download Llama 3.3 70B (~140GB) on first run")
     print("   Model will be cached for future use")
+    print("   Using batch size 2 with no quantization")
     
     pipeline = ProbePipeline(pipeline_config)
     probe, training_history = pipeline.run()
@@ -156,7 +154,8 @@ def test_llama70b_ntml():
     print("\nModel download info:")
     print("- Model will be cached in ~/.cache/huggingface/hub/")
     print("- Future runs will use the cached model")
-    print("- Total model size: ~140GB (but 8-bit quantized for memory efficiency)")
+    print("- Total model size: ~140GB (full precision, no quantization)")
+    print("- Batch size: 2 (utilizing both H100s)")
 
 if __name__ == "__main__":
     test_llama70b_ntml() 
