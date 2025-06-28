@@ -102,35 +102,33 @@ class TransformerLensCollector:
                     low_cpu_mem_usage=True,
                 )
                 
-                # Convert to HookedTransformer
-                try:
-                    self.model = HookedTransformer.from_pretrained(
-                        config.model_name,
-                        hf_model=hf_model,
-                        device=None,  # Device already set by device_map
-                        dtype=dtype,
-                        fold_ln=False,
-                        center_writing_weights=False,
-                        center_unembed=False,
-                        device_map=config.device_map,  # Pass device_map to maintain distribution
-                    )
-                except TypeError:
-                    # If HookedTransformer doesn't support device_map, load without it
-                    # and manually preserve the device distribution
-                    print("   HookedTransformer doesn't support device_map, preserving distribution...")
-                    self.model = HookedTransformer.from_pretrained(
-                        config.model_name,
-                        hf_model=hf_model,
-                        device=None,  # Device already set by device_map
-                        dtype=dtype,
-                        fold_ln=False,
-                        center_writing_weights=False,
-                        center_unembed=False,
-                    )
-                    # Disable automatic device movement
-                    self.model.cfg.device = None
+                # Convert to HookedTransformer with device distribution preservation
+                print("   Converting to HookedTransformer while preserving device distribution...")
                 
-                print(f"✅ Large model loaded with device_map='auto' distribution")
+                # Create HookedTransformer without moving to device
+                self.model = HookedTransformer.from_pretrained(
+                    config.model_name,
+                    hf_model=hf_model,
+                    device=None,  # Don't move to device yet
+                    dtype=dtype,
+                    fold_ln=False,
+                    center_writing_weights=False,
+                    center_unembed=False,
+                )
+                
+                # Monkey patch the move_model_modules_to_device method to do nothing
+                # This prevents HookedTransformer from trying to move everything to one device
+                original_move_method = self.model.move_model_modules_to_device
+                def no_move_method():
+                    print("   Skipping device movement to preserve distribution")
+                    return
+                
+                self.model.move_model_modules_to_device = no_move_method
+                
+                # Set device to None to prevent further device operations
+                self.model.cfg.device = None
+                
+                print(f"✅ Large model loaded with device_map='auto' distribution preserved")
             else:
                 # Standard loading for smaller models
                 self.model = HookedTransformer.from_pretrained_no_processing(config.model_name)
