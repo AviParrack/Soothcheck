@@ -82,9 +82,9 @@ class TransformerLensCollector:
             )
             print(f"✅ Model loaded with quantization: 8bit={config.load_in_8bit}, 4bit={config.load_in_4bit}")
         else:
-            # Standard loading - use HookedTransformer's native device management
+            # Standard loading - use HookedTransformer's native device_map
             if config.device_map == "auto":
-                print("Loading large model with HookedTransformer's native device management...")
+                print("Loading large model with HookedTransformer's native device_map...")
                 
                 # Clear GPU cache before loading
                 if torch.cuda.is_available():
@@ -94,18 +94,14 @@ class TransformerLensCollector:
                 bfloat16_models = ['llama', 'mistral', 'gemma', 'phi']
                 dtype = torch.bfloat16 if any(m in config.model_name.lower() for m in bfloat16_models) else torch.float32
                 
-                # Use HookedTransformer's native device_map and quantization
+                # Use HookedTransformer's native device_map
                 self.model = HookedTransformer.from_pretrained(
                     config.model_name,
-                    device_map="auto",  # Let HookedTransformer handle device placement
+                    device_map="auto",  # Let HookedTransformer handle multi-GPU distribution
                     torch_dtype=dtype,
-                    load_in_4bit=True,  # Use 4-bit quantization to fit on GPU
-                    bnb_4bit_quant_type="nf4",
-                    bnb_4bit_use_double_quant=True,
-                    bnb_4bit_compute_dtype=torch.bfloat16,
                 )
                 
-                print(f"✅ Large model loaded with HookedTransformer's device management and 4-bit quantization")
+                print(f"✅ Large model loaded with HookedTransformer's device_map across {torch.cuda.device_count()} GPUs")
             else:
                 # Standard loading for smaller models
                 self.model = HookedTransformer.from_pretrained_no_processing(config.model_name)
