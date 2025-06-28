@@ -95,7 +95,7 @@ class TransformerLensCollector:
                 dtype = torch.bfloat16 if any(m in config.model_name.lower() for m in bfloat16_models) else torch.float32
                 
                 # Use HookedTransformer's native device_map
-                self.model = HookedTransformer.from_pretrained(
+                self.model = HookedTransformer.from_pretrained_no_processing(
                     config.model_name,
                     device_map="auto",  # Let HookedTransformer handle multi-GPU distribution
                     torch_dtype=dtype,
