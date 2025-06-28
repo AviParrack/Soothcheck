@@ -12,6 +12,7 @@ from probity.probes import LogisticProbe
 from probity_extensions.conversational import ConversationalProbingDataset
 from probity.datasets.tokenized import TokenizedProbingDataset
 from transformers import AutoTokenizer
+from probity.probes.base import BaseProbe
 
 def quick_eval_3t3l_layer22():
     """Quick evaluation of the 3T3L Layer 22 probe."""
@@ -19,7 +20,7 @@ def quick_eval_3t3l_layer22():
     
     # 1. Load the trained probe
     print("1. Loading trained probe...")
-    probe = LogisticProbe.load("test_llama70b_3t3l_layer22_probe.pt")
+    probe = BaseProbe.load_json("test_llama70b_3t3l_layer22_probe.pt")
     print(f"   Probe loaded: {probe.name}")
     print(f"   Hook point: {probe.hook_point}")
     print(f"   Input size: {probe.input_size}")
