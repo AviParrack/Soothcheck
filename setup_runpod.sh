@@ -27,20 +27,23 @@ print_error() {
     echo -e "${RED}[ERROR]${NC} $1"
 }
 
-# 1. Create and activate conda environment
-print_status "Creating conda environment 'soothcheck'..."
-conda create -n soothcheck python=3.10 -y
-
-print_status "Activating conda environment..."
-conda activate soothcheck
-
-# 2. Auto-load environment for future sessions
-print_status "Setting up auto-activation for future sessions..."
-if ! grep -q "conda activate soothcheck" ~/.bashrc; then
-    echo 'conda activate soothcheck' >> ~/.bashrc
-    print_success "Added conda activation to .bashrc"
+# Check if virtual environment is already activated
+if [[ "$VIRTUAL_ENV" == "" ]]; then
+    print_status "Creating Python virtual environment..."
+    python3 -m venv .venv
+    print_status "Activating virtual environment..."
+    source .venv/bin/activate
 else
-    print_warning "Conda activation already in .bashrc"
+    print_success "Virtual environment already activated: $VIRTUAL_ENV"
+fi
+
+# 2. Auto-load environment for future sessions (optional for venv)
+print_status "Setting up auto-activation for future sessions..."
+if ! grep -q "source .venv/bin/activate" ~/.bashrc; then
+    echo 'source .venv/bin/activate' >> ~/.bashrc
+    print_success "Added venv activation to .bashrc"
+else
+    print_warning "Venv activation already in .bashrc"
 fi
 
 # 3. Install PyTorch with CUDA support
@@ -105,7 +108,7 @@ fi
 
 print_success "🎉 Setup complete!"
 print_status "To activate the environment in future sessions:"
-echo "  conda activate soothcheck"
+echo "  source .venv/bin/activate"
 echo ""
 print_status "To test the setup, run:"
 echo "  PYTHONPATH=\$(pwd) python test_ntml_gpt2.py"
