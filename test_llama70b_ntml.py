@@ -24,10 +24,10 @@ def test_llama70b_ntml():
     """Test NTML probe training with Llama 3.3 70B"""
     print("=== NTML Probe Training with Llama 3.3 70B (Multi-GPU) ===\n")
     
-    # 1. Load NTML dataset (2 samples)
+    # 1. Load NTML dataset (3T3L 20 samples)
     print("1. Loading NTML dataset...")
     ntml_dataset = ConversationalProbingDataset.from_ntml_jsonl(
-        "data/NTML-datasets/2T1L_2samples.jsonl"
+        "data/NTML-datasets/3T3L_20samples.jsonl"
     )
     print(f"   Loaded {len(ntml_dataset.examples)} conversations")
     
@@ -67,7 +67,7 @@ def test_llama70b_ntml():
     
     # 5. Configure probe and trainer for Llama 70B
     print("\n5. Configuring probe and trainer for Llama 70B...")
-    hook_point = "blocks.32.hook_resid_pre"  # Middle layer of 70B model
+    hook_point = "blocks.22.hook_resid_pre"  # Layer 22 of 70B model
     
     probe_config = LogisticProbeConfig(
         input_size=8192,  # Llama 70B hidden size
@@ -75,8 +75,8 @@ def test_llama70b_ntml():
         bias=False,
         model_name=model_name,
         hook_point=hook_point,
-        hook_layer=32,
-        name="llama70b_ntml_probe",
+        hook_layer=22,
+        name="llama70b_3t3l_layer22_probe",
     )
     
     trainer_config = SupervisedTrainerConfig(
@@ -102,7 +102,7 @@ def test_llama70b_ntml():
         position_key="target",  # Use the statement position key
         model_name=model_name,
         hook_points=[hook_point],
-        cache_dir="./test_llama70b_cache",
+        cache_dir="./test_llama70b_3t3l_layer22_cache",
         device="cuda",
         device_map="auto",  # Let the library handle device mapping
         low_cpu_mem_usage=True,  # Reduce memory usage during loading
@@ -139,7 +139,7 @@ def test_llama70b_ntml():
             plt.plot(training_history["val_loss"], label="Validation Loss")
         plt.xlabel("Epoch")
         plt.ylabel("Loss")
-        plt.title("Llama 70B NTML Probe Training History (Multi-GPU)")
+        plt.title("Llama 70B 3T3L Layer 22 Probe Training History (Multi-GPU)")
         plt.legend()
         plt.grid(True)
         plt.show()
@@ -148,10 +148,10 @@ def test_llama70b_ntml():
     
     # 10. Save the probe
     print("\n10. Saving probe...")
-    probe.save("test_llama70b_ntml_probe.pt")
-    print("   Probe saved to test_llama70b_ntml_probe.pt")
+    probe.save("test_llama70b_3t3l_layer22_probe.pt")
+    print("   Probe saved to test_llama70b_3t3l_layer22_probe.pt")
     
-    print("\n✅ Llama 70B NTML probe training completed successfully!")
+    print("\n✅ Llama 70B 3T3L Layer 22 probe training completed successfully!")
     print("\nModel download info:")
     print("- Model will be cached in ~/.cache/huggingface/hub/")
     print("- Future runs will use the cached model")
