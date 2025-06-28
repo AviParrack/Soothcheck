@@ -49,7 +49,7 @@ def test_llama70b_ntml():
         dataset=statement_dataset,
         tokenizer=tokenizer,
         padding=True,
-        max_length=256,  # Longer context for Llama
+        max_length=4096,  # Full context length for Llama (supports up to 128K, but 4K is standard)
         add_special_tokens=True,
     )
     print(f"   Tokenized dataset size: {len(tokenized_dataset.examples)}")

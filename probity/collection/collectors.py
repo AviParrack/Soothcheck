@@ -233,7 +233,7 @@ class TransformerLensCollector:
                         all_activations[hook] = []
                     all_activations[hook].append(cache[hook].cpu())
 
-        # Create ActivationCache objects
+        # Create ActivationCache objects with consistent padding
         return {
             hook: ActivationStore(
                 raw_activations=torch.cat(activations, dim=0),
