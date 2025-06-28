@@ -82,10 +82,41 @@ class TransformerLensCollector:
             )
             print(f"✅ Model loaded with quantization: 8bit={config.load_in_8bit}, 4bit={config.load_in_4bit}")
         else:
-            # Standard loading
-            self.model = HookedTransformer.from_pretrained_no_processing(config.model_name)
-            print(f"Moving model to device: {config.device}")
-            self.model.to(config.device)
+            # Standard loading - but use HuggingFace path for large models with device_map
+            if config.device_map == "auto":
+                print(f"Loading large model with device_map='auto' for GPU distribution...")
+                from transformers import AutoModelForCausalLM
+                import torch
+                
+                # Determine dtype for Llama models
+                bfloat16_models = ['llama', 'mistral', 'gemma', 'phi']
+                dtype = torch.bfloat16 if any(m in config.model_name.lower() for m in bfloat16_models) else torch.float32
+                
+                # Load with HuggingFace first for proper device mapping
+                hf_model = AutoModelForCausalLM.from_pretrained(
+                    config.model_name,
+                    device_map=config.device_map,
+                    torch_dtype=dtype,
+                    low_cpu_mem_usage=config.low_cpu_mem_usage,
+                    trust_remote_code=True
+                )
+                
+                # Convert to HookedTransformer
+                self.model = HookedTransformer.from_pretrained(
+                    config.model_name,
+                    hf_model=hf_model,
+                    device=None,  # Device already set by device_map
+                    dtype=dtype,
+                    fold_ln=False,
+                    center_writing_weights=False,
+                    center_unembed=False,
+                )
+                print(f"✅ Large model loaded with device_map='auto' distribution")
+            else:
+                # Standard loading for smaller models
+                self.model = HookedTransformer.from_pretrained_no_processing(config.model_name)
+                print(f"Moving model to device: {config.device}")
+                self.model.to(config.device)
         
         # --- Multi-GPU support ---
         if config.multi_gpu and config.multi_gpu.enabled:
