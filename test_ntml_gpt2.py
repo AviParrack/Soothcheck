@@ -27,15 +27,15 @@ def test_ntml_probe_training():
     
     # 1. Load NTML dataset
     print("1. Loading NTML dataset...")
-    ntml_dataset = ConversationalProbingDataset.from_jsonl(
+    ntml_dataset = ConversationalProbingDataset.from_ntml_jsonl(
         "data/NTML-datasets/2T1L_2samples.jsonl"
     )
     print(f"   Loaded {len(ntml_dataset)} examples")
     
     # 2. Convert to statement-level examples
     print("\n2. Converting to statement-level examples...")
-    statement_dataset = ntml_dataset.to_statement_level()
-    print(f"   Created {len(statement_dataset)} statement-level examples")
+    statement_dataset = ntml_dataset.get_statement_dataset()  # None = all statements
+    print(f"   Created {len(statement_dataset.examples)} statement-level examples")
     
     # 3. Tokenize with GPT-2
     print("\n3. Tokenizing with GPT-2...")

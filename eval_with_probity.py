@@ -15,6 +15,7 @@ from probity.probes import BaseProbe
 from probity_extensions.conversational import ConversationalProbingDataset
 from probity.datasets.tokenized import TokenizedProbingDataset
 from transformers import AutoTokenizer
+from probity.probes import LogisticProbe
 
 def eval_with_probity():
     """Evaluate the trained probe using probity's built-in system"""
@@ -22,15 +23,16 @@ def eval_with_probity():
     
     # 1. Load the trained probe
     print("1. Loading trained probe...")
-    probe = BaseProbe.load_json("trained_probes/logistic/layer_7_probe.json")
-    print(f"   Probe loaded from trained_probes/logistic/layer_7_probe.json")
+    probe = LogisticProbe.load("test_ntml_probe.pt")
+    probe.to("cuda")
+    print(f"   Probe loaded from test_ntml_probe.pt")
     
     # 2. Load evaluation dataset
     print("\n2. Loading evaluation dataset...")
-    ntml_dataset = ConversationalProbingDataset.from_jsonl(
+    ntml_dataset = ConversationalProbingDataset.from_ntml_jsonl(
         "data/NTML-datasets/2T1L_2samples.jsonl"
     )
-    statement_dataset = ntml_dataset.to_statement_level()
+    statement_dataset = ntml_dataset.get_statement_dataset()  # None = all statements
     
     # 3. Tokenize
     print("\n3. Tokenizing dataset...")
