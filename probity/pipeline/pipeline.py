@@ -11,6 +11,7 @@ from probity.collection.activation_store import ActivationStore
 from probity.datasets.tokenized import TokenizedProbingDataset
 from probity.probes import BaseProbe, ProbeConfig
 from probity.training.trainer import BaseProbeTrainer, BaseTrainerConfig
+from probity.utils.multigpu import MultiGPUConfig
 
 C = TypeVar("C", bound=BaseTrainerConfig)
 P = TypeVar("P", bound=ProbeConfig)
@@ -37,6 +38,7 @@ class ProbePipelineConfig:
     load_in_4bit: bool = False
     low_cpu_mem_usage: bool = True
     device_map: str = "auto"
+    multi_gpu: Optional[MultiGPUConfig] = None
 
 
 class ProbePipeline(Generic[C, P]):
@@ -59,6 +61,13 @@ class ProbePipeline(Generic[C, P]):
         if hasattr(self.config.probe_config, "device"):
             self.config.probe_config.device = self.config.device
 
+        # Propagate multi-GPU config to trainer and collector
+        if hasattr(self.config.trainer_config, "multi_gpu"):
+            self.config.trainer_config.multi_gpu = self.config.multi_gpu
+        if hasattr(self.config, "multi_gpu") and self.config.multi_gpu:
+            if hasattr(self.config, "probe_config") and hasattr(self.config.probe_config, "multi_gpu"):
+                self.config.probe_config.multi_gpu = self.config.multi_gpu
+
     def _collect_activations(self) -> Dict[str, ActivationStore]:
         """Collect activations if needed."""
         if not self.config.model_name or not self.config.hook_points:
@@ -76,6 +85,7 @@ class ProbePipeline(Generic[C, P]):
                 load_in_4bit=self.config.load_in_4bit,
                 low_cpu_mem_usage=self.config.low_cpu_mem_usage,
                 device_map=self.config.device_map,
+                multi_gpu=self.config.multi_gpu,
             )
         )
 

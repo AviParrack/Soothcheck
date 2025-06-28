@@ -16,6 +16,7 @@ from probity.probes import (
     LogisticProbe,
     LinearProbe,
 )
+from probity.utils.multigpu import MultiGPUConfig, wrap_model_for_multigpu
 
 
 @dataclass
@@ -32,6 +33,7 @@ class BaseTrainerConfig:
     optimizer_type: Literal["Adam", "SGD", "AdamW"] = "Adam"
     handle_class_imbalance: bool = True
     standardize_activations: bool = False  # Option to standardize *during* training
+    multi_gpu: Optional[MultiGPUConfig] = None  # <--- NEW
 
 
 class BaseProbeTrainer(ABC):
@@ -263,6 +265,10 @@ class SupervisedProbeTrainer(BaseProbeTrainer):
 
         target_device = torch.device(self.config.device)
         model.to(target_device)
+
+        # --- Multi-GPU support ---
+        if self.config.multi_gpu and self.config.multi_gpu.enabled:
+            model = wrap_model_for_multigpu(model, self.config.multi_gpu)
 
         is_multi_class = isinstance(model, MultiClassLogisticProbe)
         optimizer = self._create_optimizer(model)

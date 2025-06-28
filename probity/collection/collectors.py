@@ -1,9 +1,10 @@
 import torch
 from dataclasses import dataclass
-from typing import List, Dict
+from typing import List, Dict, Optional
 from transformer_lens import HookedTransformer
 from probity.datasets.tokenized import TokenizedProbingDataset
 from probity.collection.activation_store import ActivationStore
+from probity.utils.multigpu import MultiGPUConfig, wrap_model_for_multigpu
 
 
 @dataclass
@@ -20,6 +21,7 @@ class TransformerLensConfig:
     load_in_4bit: bool = False
     low_cpu_mem_usage: bool = True
     device_map: str = "auto"
+    multi_gpu: Optional[MultiGPUConfig] = None
 
 
 class TransformerLensCollector:
@@ -84,6 +86,11 @@ class TransformerLensCollector:
             self.model = HookedTransformer.from_pretrained_no_processing(config.model_name)
             print(f"Moving model to device: {config.device}")
             self.model.to(config.device)
+        
+        # --- Multi-GPU support ---
+        if config.multi_gpu and config.multi_gpu.enabled:
+            self.model = wrap_model_for_multigpu(self.model, config.multi_gpu)
+            print(f"✅ Model wrapped for multi-GPU: {config.multi_gpu.backend}")
 
     @staticmethod
     def get_layer_from_hook_point(hook_point: str) -> int:

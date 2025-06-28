@@ -1,6 +1,7 @@
 from dataclasses import dataclass, field
 from typing import Optional, Dict, Any, Literal
 import torch
+from probity.utils.multigpu import MultiGPUConfig
 
 
 @dataclass
@@ -30,6 +31,7 @@ class ProbeConfig:
 
     # Additional metadata
     additional_info: Dict[str, Any] = field(default_factory=dict)
+    multi_gpu: Optional[MultiGPUConfig] = None
 
 
 @dataclass
