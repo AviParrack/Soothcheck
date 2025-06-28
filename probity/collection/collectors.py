@@ -37,8 +37,7 @@ class TransformerLensCollector:
             print(f"⚠️  Quantization requested: 8bit={config.load_in_8bit}, 4bit={config.load_in_4bit}")
             print("   Loading via HuggingFace with proper quantization config...")
             
-            from transformers import AutoModelForCausalLM, BitsAndBytesConfig
-            import torch
+            from transformers import BitsAndBytesConfig
             
             # Determine dtype
             bfloat16_models = ['llama', 'mistral', 'gemma', 'phi']
