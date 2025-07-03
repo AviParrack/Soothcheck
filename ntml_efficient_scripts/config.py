@@ -59,6 +59,20 @@ class NTMLBinaryTrainingConfig:
     min_tokens_per_statement: int = 1  # Skip statements with fewer tokens
     token_overlap_strategy: str = "majority"  # "majority", "first", "last"
     
+    # Probe method configuration
+    probe_method: str = "pytorch"  # "sklearn" or "pytorch"
+    
+    # Sklearn-specific options
+    sklearn_C: float = 1.0  # Regularization parameter
+    sklearn_C_sweep: bool = False  # Whether to do regularization sweep
+    sklearn_C_values: Optional[List[float]] = None  # Custom C values for sweep
+    sklearn_solver: str = "liblinear"  # "liblinear", "newton-cg", "lbfgs", etc.
+    sklearn_max_iter: int = 1000  # Maximum iterations
+    
+    # PyTorch-specific options  
+    pytorch_bias: bool = True  # Whether to use bias in linear layer
+    pytorch_normalize_weights: bool = True  # Whether to normalize probe directions
+    
     def __post_init__(self):
         """Post-initialization validation and setup."""
         # Validate paths
@@ -84,6 +98,25 @@ class NTMLBinaryTrainingConfig:
         if self.device == "cuda" and not torch.cuda.is_available():
             print("Warning: CUDA not available, falling back to CPU")
             self.device = "cpu"
+
+        # Validate probe method
+        if self.probe_method not in ["sklearn", "pytorch"]:
+            raise ValueError(f"Invalid probe_method: {self.probe_method}")
+        
+        # Set sklearn defaults
+        if self.sklearn_C_values is None:
+            self.sklearn_C_values = [1e-4, 1e-3, 1e-2, 1e-1, 1.0, 1e1, 1e2, 1e3, 1e4]
+        
+        # Adjust defaults based on probe method
+        if self.probe_method == "sklearn":
+            # Sklearn is fast, so we can afford more evaluation
+            self.eval_every = 1
+            # Warn about dtype compatibility
+            if self.dtype in ['bfloat16', 'float16']:
+                print(f"ℹ️  Info: sklearn with {self.dtype} will attempt float16, fallback to float32")
+        elif self.probe_method == "pytorch":
+            # Keep existing PyTorch defaults
+            pass
     
     @property 
     def torch_dtype(self) -> torch.dtype:
@@ -164,4 +197,30 @@ LARGE_MODEL_CONFIG = {
     "activation_batch_size": 8,
     "dtype": "bfloat16",  # Memory efficient
     "gradient_clip_norm": 0.5,
+}
+
+
+SKLEARN_FAST_CONFIG = {
+    "probe_method": "sklearn",
+    "sklearn_C": 1.0,
+    "sklearn_C_sweep": False,
+    "handle_class_imbalance": True,
+    "dtype": "float32",  # Optimal for sklearn
+}
+
+SKLEARN_SWEEP_CONFIG = {
+    "probe_method": "sklearn", 
+    "sklearn_C_sweep": True,
+    "handle_class_imbalance": True,
+    "dtype": "float32",  # Optimal for sklearn
+}
+
+PYTORCH_INTERPRETABILITY_CONFIG = {
+    "probe_method": "pytorch",
+    "num_epochs": 50,
+    "learning_rate": 1e-3,
+    "weight_decay": 1e-3,
+    "pytorch_bias": True,
+    "pytorch_normalize_weights": True,
+    "dtype": "bfloat16",  # Optimal for PyTorch
 }

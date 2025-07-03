@@ -139,11 +139,68 @@ Examples:
         help="Training/validation split ratio (default: 0.8)"
     )
     
-    # Configuration presets
+    # Probe method arguments
+    parser.add_argument(
+        "--probe_method",
+        type=str,
+        choices=["sklearn", "pytorch"],
+        default="pytorch",
+        help="Probe training method (default: pytorch)"
+    )
+    
+    # Sklearn-specific arguments
+    parser.add_argument(
+        "--sklearn_C",
+        type=float,
+        default=1.0,
+        help="Sklearn regularization parameter C (default: 1.0)"
+    )
+    parser.add_argument(
+        "--sklearn_C_sweep",
+        action="store_true",
+        help="Perform regularization sweep to find best C"
+    )
+    parser.add_argument(
+        "--sklearn_C_values",
+        nargs='+',
+        type=float,
+        help="Custom C values for sweep (e.g., --sklearn_C_values 0.1 1.0 10.0)"
+    )
+    parser.add_argument(
+        "--sklearn_solver",
+        type=str,
+        choices=["liblinear", "newton-cg", "lbfgs", "sag", "saga"],
+        default="liblinear",
+        help="Sklearn solver (default: liblinear)"
+    )
+    
+    # PyTorch-specific arguments
+    parser.add_argument(
+        "--pytorch_bias",
+        action="store_true",
+        default=True,
+        help="Use bias term in PyTorch probe (default: True)"
+    )
+    parser.add_argument(
+        "--pytorch_no_bias",
+        action="store_true",
+        help="Disable bias term in PyTorch probe"
+    )
+    parser.add_argument(
+        "--weight_decay",
+        type=float,
+        default=1e-3,
+        help="L2 regularization for PyTorch training (default: 1e-3)"
+    )
+    
+    # Update presets
     parser.add_argument(
         "--preset", 
         type=str, 
-        choices=["fast_debug", "production", "large_model"],
+        choices=[
+            "fast_debug", "production", "large_model", 
+            "sklearn_fast", "sklearn_sweep", "pytorch_interpretability"
+        ],
         help="Use predefined configuration preset"
     )
     parser.add_argument(
@@ -307,6 +364,14 @@ def create_config_from_args(args, layer: int) -> NTMLBinaryTrainingConfig:
         config_dict.update(PRODUCTION_CONFIG)
     elif args.preset == "large_model":
         config_dict.update(LARGE_MODEL_CONFIG)
+
+    # Apply new presets
+    if args.preset == "sklearn_fast":
+        config_dict.update(SKLEARN_FAST_CONFIG)
+    elif args.preset == "sklearn_sweep":
+        config_dict.update(SKLEARN_SWEEP_CONFIG)
+    elif args.preset == "pytorch_interpretability":
+        config_dict.update(PYTORCH_INTERPRETABILITY_CONFIG)
     
     # Override with command line arguments
     dataset_path = args.train_dataset_dir or args.dataset_path
@@ -347,6 +412,24 @@ def create_config_from_args(args, layer: int) -> NTMLBinaryTrainingConfig:
         config_dict["force_recache"] = args.force_recache
     if args.verbose:
         config_dict["verbose"] = args.verbose
+    
+    # Add new probe method overrides
+    if args.probe_method:
+        config_dict["probe_method"] = args.probe_method
+    if args.sklearn_C:
+        config_dict["sklearn_C"] = args.sklearn_C
+    if args.sklearn_C_sweep:
+        config_dict["sklearn_C_sweep"] = args.sklearn_C_sweep
+    if args.sklearn_C_values:
+        config_dict["sklearn_C_values"] = args.sklearn_C_values
+    if args.sklearn_solver:
+        config_dict["sklearn_solver"] = args.sklearn_solver
+    if args.pytorch_no_bias:
+        config_dict["pytorch_bias"] = False
+    elif args.pytorch_bias is not None:
+        config_dict["pytorch_bias"] = args.pytorch_bias
+    if args.weight_decay:
+        config_dict["weight_decay"] = args.weight_decay
     
     # Handle device
     if args.device == "auto":
