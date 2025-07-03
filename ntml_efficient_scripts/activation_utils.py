@@ -360,3 +360,259 @@ def prepare_ntml_training_data(config: NTMLBinaryTrainingConfig) -> Tuple[torch.
     finally:
         # Always cleanup model memory
         activation_cache.cleanup_model()
+
+def collect_all_layers_activations(config: NTMLBinaryTrainingConfig, layers: List[int]) -> Dict[int, Tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
+    """
+    Efficiently collect activations for all layers at once.
+    
+    Args:
+        config: Configuration (will be used for dataset_path, model_name, etc.)
+        layers: List of layer numbers to collect activations for
+        
+    Returns:
+        Dict mapping layer number to (activations, labels, assistant_masks) tuples
+    """
+    logger.info(f"Collecting activations for {len(layers)} layers efficiently...")
+    
+    # Load and process dataset once
+    dataset = NTMLBinaryDataset(config)
+    dataset.load_and_process()
+    
+    # Create activation cache instance
+    activation_cache = NTMLActivationCache(config)
+    
+    # Generate cache key for this dataset + model + layers combination
+    cache_key = _generate_cache_key(config, layers, dataset)
+    cache_dir = Path(config.cache_dir) / cache_key
+    
+    # Check if we have valid cached activations
+    if not config.force_recache and _check_cache_validity(cache_dir, config, layers, dataset):
+        logger.info(f"Loading cached activations from {cache_dir}")
+        return _load_cached_activations(cache_dir, layers)
+    
+    # Collect activations for all layers at once
+    logger.info(f"Collecting fresh activations for layers: {layers}")
+    activation_cache.load_model()
+    
+    try:
+        # Get hook points for all layers
+        hook_points = [f"blocks.{layer}.hook_resid_pre" for layer in layers]
+        
+        # Collect activations for all layers in one pass
+        all_activations = {}
+        all_labels = None
+        all_assistant_masks = None
+        
+        logger.info(f"Processing {len(dataset.examples)} examples in batches of {config.activation_batch_size}")
+        
+        with torch.no_grad():
+            for batch_start in tqdm(
+                range(0, len(dataset.examples), config.activation_batch_size),
+                desc="Collecting multi-layer activations"
+            ):
+                batch_end = min(batch_start + config.activation_batch_size, len(dataset.examples))
+                batch_examples = dataset.examples[batch_start:batch_end]
+                
+                # Prepare batch tensors
+                batch_input_ids = []
+                batch_attention_masks = []
+                batch_labels = []
+                batch_assistant_masks = []
+                
+                for example in batch_examples:
+                    batch_input_ids.append(example.tokens)
+                    batch_attention_masks.append(example.attention_mask)
+                    batch_labels.append(example.labels)
+                    batch_assistant_masks.append(example.assistant_mask)
+                
+                # Convert to tensors
+                input_ids = torch.tensor(batch_input_ids, dtype=torch.long).to(config.device)
+                
+                # Run model with caching for ALL layers at once
+                _, cache = activation_cache.model.run_with_cache(
+                    input_ids,
+                    names_filter=hook_points,
+                    return_cache_object=True,
+                    stop_at_layer=max(layers) + 1
+                )
+                
+                # Store activations for each layer
+                for hook_point in hook_points:
+                    layer_num = int(hook_point.split(".")[1])
+                    if layer_num not in all_activations:
+                        all_activations[layer_num] = []
+                    
+                    batch_activations = cache[hook_point]
+                    all_activations[layer_num].append(batch_activations.cpu())
+                
+                # Store labels and masks (same for all layers)
+                if all_labels is None:
+                    all_labels = []
+                    all_assistant_masks = []
+                
+                all_labels.append(torch.tensor(batch_labels, dtype=torch.long))
+                all_assistant_masks.append(torch.tensor(batch_assistant_masks, dtype=torch.long))
+        
+        # Concatenate all batches
+        concatenated_labels = torch.cat(all_labels, dim=0)
+        concatenated_assistant_masks = torch.cat(all_assistant_masks, dim=0)
+        
+        # Prepare final results
+        layer_results = {}
+        for layer_num in layers:
+            if layer_num in all_activations:
+                layer_activations = torch.cat(all_activations[layer_num], dim=0)
+                layer_results[layer_num] = (layer_activations, concatenated_labels, concatenated_assistant_masks)
+                logger.info(f"Layer {layer_num} activations: {layer_activations.shape}")
+        
+        # Cache the results
+        _save_activations_to_cache(cache_dir, layer_results, config, dataset)
+        
+        return layer_results
+        
+    finally:
+        # Always cleanup model memory
+        activation_cache.cleanup_model()
+
+
+def extract_layer_training_data(layer_results: Dict[int, Tuple[torch.Tensor, torch.Tensor, torch.Tensor]], 
+                               layer: int) -> Tuple[torch.Tensor, torch.Tensor, Dict]:
+    """
+    Extract training data for a specific layer from cached results.
+    
+    Args:
+        layer_results: Results from collect_all_layers_activations()
+        layer: Layer number to extract
+        
+    Returns:
+        (assistant_activations, assistant_labels, metadata) for the specified layer
+    """
+    if layer not in layer_results:
+        raise ValueError(f"Layer {layer} not found in cached results. Available: {list(layer_results.keys())}")
+    
+    all_activations, all_labels, all_assistant_masks = layer_results[layer]
+    
+    logger.info(f"Extracting training data for layer {layer}")
+    
+    # Extract only assistant tokens for training (same logic as before)
+    batch_size, seq_len, hidden_size = all_activations.shape
+    
+    flat_activations = all_activations.view(-1, hidden_size)
+    flat_labels = all_labels.view(-1)
+    flat_assistant_masks = all_assistant_masks.view(-1)
+    
+    # Extract only assistant tokens
+    assistant_indices = (flat_assistant_masks == 1).nonzero(as_tuple=True)[0]
+    
+    assistant_activations = flat_activations[assistant_indices]
+    assistant_labels = flat_labels[assistant_indices]
+    
+    logger.info(f"Extracted {len(assistant_activations)} assistant tokens for layer {layer}")
+    logger.info(f"Label distribution: {torch.bincount(assistant_labels).tolist()}")
+    
+    # Prepare metadata
+    metadata = {
+        "layer": layer,
+        "num_assistant_tokens": len(assistant_activations),
+        "hidden_size": hidden_size,
+        "label_distribution": torch.bincount(assistant_labels).tolist()
+    }
+    
+    return assistant_activations, assistant_labels, metadata
+
+
+def _generate_cache_key(config: NTMLBinaryTrainingConfig, layers: List[int], dataset) -> str:
+    """Generate a unique cache key for this configuration."""
+    import hashlib
+    
+    # Create hash based on key parameters
+    key_components = [
+        config.dataset_path,
+        config.model_name,
+        config.max_length,
+        len(dataset.examples),
+        str(sorted(layers)),
+        str(dataset.label_distribution),
+    ]
+    
+    content_str = "|".join(str(comp) for comp in key_components)
+    return hashlib.md5(content_str.encode()).hexdigest()[:16]
+
+
+def _check_cache_validity(cache_dir: Path, config: NTMLBinaryTrainingConfig, 
+                         layers: List[int], dataset) -> bool:
+    """Check if cached activations are valid for this configuration."""
+    
+    metadata_file = cache_dir / "cache_metadata.json"
+    if not metadata_file.exists():
+        return False
+    
+    try:
+        with open(metadata_file, 'r') as f:
+            metadata = json.load(f)
+        
+        # Verify compatibility
+        required_matches = [
+            metadata.get("model_name") == config.model_name,
+            metadata.get("dataset_path") == config.dataset_path,
+            metadata.get("dataset_size") == len(dataset.examples),
+            metadata.get("max_length") == config.max_length,
+            set(metadata.get("layers", [])) >= set(layers),
+            metadata.get("label_distribution") == dataset.label_distribution,
+        ]
+        
+        return all(required_matches)
+        
+    except Exception as e:
+        logger.warning(f"Error validating cache: {e}")
+        return False
+
+
+def _load_cached_activations(cache_dir: Path, layers: List[int]) -> Dict[int, Tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
+    """Load cached activations from disk."""
+    layer_results = {}
+    
+    for layer in layers:
+        cache_file = cache_dir / f"layer_{layer}.pt"
+        if cache_file.exists():
+            cached_data = torch.load(cache_file, map_location="cpu")
+            layer_results[layer] = (
+                cached_data["activations"],
+                cached_data["labels"], 
+                cached_data["assistant_masks"]
+            )
+            logger.info(f"Loaded cached activations for layer {layer}: {cached_data['activations'].shape}")
+    
+    return layer_results
+
+
+def _save_activations_to_cache(cache_dir: Path, layer_results: Dict, 
+                              config: NTMLBinaryTrainingConfig, dataset) -> None:
+    """Save activations to cache."""
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Save each layer's activations
+    for layer, (activations, labels, assistant_masks) in layer_results.items():
+        cache_file = cache_dir / f"layer_{layer}.pt"
+        torch.save({
+            "activations": activations,
+            "labels": labels,
+            "assistant_masks": assistant_masks,
+            "hidden_size": activations.shape[-1],
+        }, cache_file)
+    
+    # Save metadata
+    metadata = {
+        "model_name": config.model_name,
+        "dataset_path": config.dataset_path,
+        "dataset_size": len(dataset.examples),
+        "max_length": config.max_length,
+        "layers": list(layer_results.keys()),
+        "label_distribution": dataset.label_distribution,
+        "cache_version": "1.0",
+    }
+    
+    with open(cache_dir / "cache_metadata.json", 'w') as f:
+        json.dump(metadata, f, indent=2)
+    
+    logger.info(f"Saved activations cache to {cache_dir}")

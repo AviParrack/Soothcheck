@@ -17,7 +17,7 @@ import logging
 import json
 import time
 from pathlib import Path
-from typing import Optional, List
+from typing import List, Dict, Optional
 
 # Add probity to path for imports
 probity_root = Path(__file__).parent.parent
@@ -512,7 +512,9 @@ def main():
         else:
             print("❌ Must specify either --train_dataset_dir, --dataset_path, or --config")
             return 1
-    
+
+
+
     # Determine layers to train on
     try:
         if args.config:
@@ -537,89 +539,211 @@ def main():
     
     start_time = time.time()
     
-    # Train on each layer
-    for layer_idx, layer in enumerate(layers):
+    # NEW EFFICIENT APPROACH: Collect activations for all layers at once
+    if len(layers) > 1:
         print(f"\n{'='*60}")
-        print(f"🏋️ Training Layer {layer} ({layer_idx + 1}/{len(layers)})")
+        print(f"🚀 Efficient Multi-Layer Training ({len(layers)} layers)")
         print(f"{'='*60}")
         
+        # Create a base config for activation collection
+        if args.config:
+            base_config = load_config_from_file(args.config)
+        else:
+            base_config = create_config_from_args(args, layers[0])  # Use first layer for base config
+        
         try:
-            # Load configuration for this layer
-            if args.config:
-                config = load_config_from_file(args.config)
-            else:
-                config = create_config_from_args(args, layer)
+            # Import the new efficient functions
+            from ntml_efficient_scripts.activation_utils import collect_all_layers_activations, extract_layer_training_data
             
-            # Update probe name to include layer
-            base_name = config.probe_name or f"ntml_binary_{Path(dataset_path).stem}"
-            config.probe_name = f"{base_name}_layer_{layer}"
-
-            # Validate configuration
-            if not validate_config(config):
-                print(f"❌ Configuration validation failed for layer {layer}")
+            # Phase 1: Collect activations for all layers at once
+            print(f"\n📊 Phase 1: Collecting activations for all {len(layers)} layers...")
+            cached_activations = collect_all_layers_activations(base_config, layers)
+            print(f"✅ Cached activations for {len(cached_activations)} layers")
+            
+            # Phase 2: Train each layer using cached activations
+            print(f"\n🏋️ Phase 2: Training probes on cached activations...")
+            
+            for layer_idx, layer in enumerate(layers):
+                print(f"\n{'='*60}")
+                print(f"🏋️ Training Layer {layer} ({layer_idx + 1}/{len(layers)}) - Using Cached Activations")
+                print(f"{'='*60}")
+                
+                try:
+                    # Load configuration for this layer
+                    if args.config:
+                        config = load_config_from_file(args.config)
+                    else:
+                        config = create_config_from_args(args, layer)
+                    
+                    # Update probe name to include layer
+                    base_name = config.probe_name or f"ntml_binary_{Path(args.dataset_path or args.train_dataset_dir).stem}"
+                    config.probe_name = f"{base_name}_layer_{layer}"
+                    
+                    # Validate configuration
+                    if not validate_config(config):
+                        print(f"❌ Configuration validation failed for layer {layer}")
+                        failed_layers.append(layer)
+                        continue
+                    
+                    # Setup layer-specific logging
+                    output_paths = config.get_output_paths()
+                    setup_logging(verbose=config.verbose, log_file=str(output_paths["log"]))
+                    
+                    # Print configuration summary
+                    print_config_summary(config)
+                    
+                    if args.dry_run:
+                        print(f"✅ Dry run completed for layer {layer} - configuration is valid")
+                        continue
+                    
+                    # Extract training data for this layer from cache
+                    logger.info(f"Extracting cached training data for layer {layer}...")
+                    assistant_activations, assistant_labels, metadata = extract_layer_training_data(cached_activations, layer)
+                    
+                    # Train the probe
+                    logger.info(f"Training binary token classifier for layer {layer}...")
+                    trainer = NTMLBinaryTrainer(config)
+                    training_results = trainer.train(assistant_activations, assistant_labels)
+                    
+                    # Save the trained model
+                    logger.info(f"Saving trained probe for layer {layer}...")
+                    trainer.save_model(str(output_paths["probe"]), {
+                        **metadata,
+                        **training_results,
+                    })
+                    
+                    # Save configuration and metrics
+                    with open(output_paths["config"], 'w') as f:
+                        json.dump(config.to_dict(), f, indent=2)
+                    
+                    with open(output_paths["metrics"], 'w') as f:
+                        json.dump(training_results["final_metrics"], f, indent=2)
+                    
+                    # Store results
+                    all_results[layer] = {
+                        "config": config.to_dict(),
+                        "training_results": training_results,
+                        "paths": {str(k): str(v) for k, v in output_paths.items()},
+                    }
+                    
+                    successful_layers.append(layer)
+                    
+                    # Print layer summary
+                    print(f"\n✅ Layer {layer} completed successfully!")
+                    print(f"📊 Final validation F1: {training_results['final_metrics']['f1']:.4f}")
+                    print(f"📊 Final validation AUROC: {training_results['final_metrics']['auroc']:.4f}")
+                    print(f"💾 Probe saved: {output_paths['probe']}")
+                    
+                except KeyboardInterrupt:
+                    print(f"\n❌ Training interrupted by user at layer {layer}")
+                    failed_layers.append(layer)
+                    break
+                except Exception as e:
+                    logger.error(f"Training failed for layer {layer}: {e}", exc_info=args.verbose)
+                    print(f"❌ Layer {layer} failed: {e}")
+                    failed_layers.append(layer)
+                    continue
+                    
+        except Exception as e:
+            print(f"❌ Efficient multi-layer training failed: {e}")
+            print("Falling back to single-layer approach...")
+            # Fall back to original approach
+            layers_to_process = [l for l in layers if l not in successful_layers]
+        else:
+            layers_to_process = []  # All layers processed successfully
+    else:
+        # Single layer - use original approach
+        layers_to_process = layers
+    
+    # FALLBACK: Original single-layer approach for remaining layers
+    if layers_to_process:
+        print(f"\n{'='*60}")
+        print(f"🔄 Single-Layer Training ({len(layers_to_process)} layers)")
+        print(f"{'='*60}")
+        
+        for layer_idx, layer in enumerate(layers_to_process):
+            # ... existing single-layer training code ...
+            print(f"\n{'='*60}")
+            print(f"🏋️ Training Layer {layer} ({layer_idx + 1}/{len(layers)})")
+            print(f"{'='*60}")
+            
+            try:
+                # Load configuration for this layer
+                if args.config:
+                    config = load_config_from_file(args.config)
+                else:
+                    config = create_config_from_args(args, layer)
+                
+                # Update probe name to include layer
+                base_name = config.probe_name or f"ntml_binary_{Path(dataset_path).stem}"
+                config.probe_name = f"{base_name}_layer_{layer}"
+    
+                # Validate configuration
+                if not validate_config(config):
+                    print(f"❌ Configuration validation failed for layer {layer}")
+                    failed_layers.append(layer)
+                    continue
+    
+                # Setup layer-specific logging
+                output_paths = config.get_output_paths()
+                setup_logging(verbose=config.verbose, log_file=str(output_paths["log"]))
+                
+    
+                
+                # Print configuration summary
+                print_config_summary(config)
+                
+                if args.dry_run:
+                    print(f"✅ Dry run completed for layer {layer} - configuration is valid")
+                    continue
+                
+                # Prepare training data (will use cached activations if available)
+                logger.info(f"Preparing NTML training data for layer {layer}...")
+                assistant_activations, assistant_labels, metadata = prepare_ntml_training_data(config)
+                
+                # Train the probe
+                logger.info(f"Training binary token classifier for layer {layer}...")
+                trainer = NTMLBinaryTrainer(config)
+                training_results = trainer.train(assistant_activations, assistant_labels)
+                
+                # Save the trained model
+                logger.info(f"Saving trained probe for layer {layer}...")
+                trainer.save_model(str(output_paths["probe"]), {
+                    **metadata,
+                    **training_results,
+                })
+                
+                # Save configuration and metrics
+                with open(output_paths["config"], 'w') as f:
+                    json.dump(config.to_dict(), f, indent=2)
+                
+                with open(output_paths["metrics"], 'w') as f:
+                    json.dump(training_results["final_metrics"], f, indent=2)
+                
+                # Store results
+                all_results[layer] = {
+                    "config": config.to_dict(),
+                    "training_results": training_results,
+                    "paths": {str(k): str(v) for k, v in output_paths.items()},
+                }
+                
+                successful_layers.append(layer)
+                
+                # Print layer summary
+                print(f"\n✅ Layer {layer} completed successfully!")
+                print(f"📊 Final validation F1: {training_results['final_metrics']['f1']:.4f}")
+                print(f"📊 Final validation AUROC: {training_results['final_metrics']['auroc']:.4f}")
+                print(f"💾 Probe saved: {output_paths['probe']}")
+                
+            except KeyboardInterrupt:
+                print(f"\n❌ Training interrupted by user at layer {layer}")
+                failed_layers.append(layer)
+                break
+            except Exception as e:
+                logger.error(f"Training failed for layer {layer}: {e}", exc_info=args.verbose)
+                print(f"❌ Layer {layer} failed: {e}")
                 failed_layers.append(layer)
                 continue
-
-            # Setup layer-specific logging
-            output_paths = config.get_output_paths()
-            setup_logging(verbose=config.verbose, log_file=str(output_paths["log"]))
-            
-
-            
-            # Print configuration summary
-            print_config_summary(config)
-            
-            if args.dry_run:
-                print(f"✅ Dry run completed for layer {layer} - configuration is valid")
-                continue
-            
-            # Prepare training data (will use cached activations if available)
-            logger.info(f"Preparing NTML training data for layer {layer}...")
-            assistant_activations, assistant_labels, metadata = prepare_ntml_training_data(config)
-            
-            # Train the probe
-            logger.info(f"Training binary token classifier for layer {layer}...")
-            trainer = NTMLBinaryTrainer(config)
-            training_results = trainer.train(assistant_activations, assistant_labels)
-            
-            # Save the trained model
-            logger.info(f"Saving trained probe for layer {layer}...")
-            trainer.save_model(str(output_paths["probe"]), {
-                **metadata,
-                **training_results,
-            })
-            
-            # Save configuration and metrics
-            with open(output_paths["config"], 'w') as f:
-                json.dump(config.to_dict(), f, indent=2)
-            
-            with open(output_paths["metrics"], 'w') as f:
-                json.dump(training_results["final_metrics"], f, indent=2)
-            
-            # Store results
-            all_results[layer] = {
-                "config": config.to_dict(),
-                "training_results": training_results,
-                "paths": {str(k): str(v) for k, v in output_paths.items()},
-            }
-            
-            successful_layers.append(layer)
-            
-            # Print layer summary
-            print(f"\n✅ Layer {layer} completed successfully!")
-            print(f"📊 Final validation F1: {training_results['final_metrics']['f1']:.4f}")
-            print(f"📊 Final validation AUROC: {training_results['final_metrics']['auroc']:.4f}")
-            print(f"💾 Probe saved: {output_paths['probe']}")
-            
-        except KeyboardInterrupt:
-            print(f"\n❌ Training interrupted by user at layer {layer}")
-            failed_layers.append(layer)
-            break
-        except Exception as e:
-            logger.error(f"Training failed for layer {layer}: {e}", exc_info=args.verbose)
-            print(f"❌ Layer {layer} failed: {e}")
-            failed_layers.append(layer)
-            continue
     
     total_time = time.time() - start_time
     
