@@ -201,16 +201,36 @@ def main():
     conversations = extract_conversations(data)
     labels = [convert_label_to_binary(item.get('label', 'skip')) for item in data]
     
+    # Print raw label distribution before filtering
+    raw_label_counts = {}
+    for item in data:
+        label = str(item.get('label', 'skip')).lower().strip()
+        raw_label_counts[label] = raw_label_counts.get(label, 0) + 1
+    print("\nRaw label distribution:")
+    for label, count in raw_label_counts.items():
+        print(f"  {label}: {count}")
+    
     # Filter out skipped samples
     valid_indices = [i for i, label in enumerate(labels) if label != -1]
     if len(valid_indices) < len(labels):
-        print(f"Filtered out {len(labels) - len(valid_indices)} samples with skip/unknown labels")
+        print(f"\nFiltered out {len(labels) - len(valid_indices)} samples with skip/unknown labels")
         conversations = [conversations[i] for i in valid_indices]
         labels = [labels[i] for i in valid_indices]
         data = [data[i] for i in valid_indices]
     
-    print(f"Processing {len(conversations)} valid samples")
-    print(f"Label distribution: {sum(labels)} deceptive, {len(labels) - sum(labels)} honest")
+    print(f"\nProcessing {len(conversations)} valid samples")
+    print(f"Binary label distribution:")
+    print(f"  Deceptive (1): {sum(labels)}")
+    print(f"  Honest (0): {len(labels) - sum(labels)}")
+    print(f"  Ratio deceptive/honest: {sum(labels)/(len(labels) - sum(labels)):.2f}")
+    
+    # Add debug print of first few samples and their labels
+    print("\nFirst 5 samples and their labels:")
+    for i in range(min(5, len(data))):
+        print(f"\nSample {i+1}:")
+        print(f"  Original label: {data[i].get('label', 'skip')}")
+        print(f"  Binary label: {labels[i]}")
+        print(f"  First 100 chars: {conversations[i][:100]}...")
     
     # Load probe
     print(f"\nInitializing probe from {args.probe_path}")
