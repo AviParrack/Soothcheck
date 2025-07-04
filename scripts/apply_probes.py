@@ -179,33 +179,57 @@ def main():
     data = load_jsonl(args.input_file, args.num_samples)
     print(f"Loaded {len(data)} samples")
     
-    # Extract conversations
+    # Extract conversations and labels
     print("Extracting conversations")
     conversations = extract_conversations(data)
+    labels = [item.get('label', 0) for item in data]  # Default to 0 if no label
     
-    # Apply probe
-    print(f"Applying probe from layer {args.layer}")
-    scores = apply_probe(
-        conversations=conversations,
+    # Load probe
+    print(f"\nInitializing probe from {args.probe_path}")
+    probe = load_probe(args.probe_path, args.device)
+    
+    # Initialize evaluator
+    print(f"Initializing evaluator with model {args.model_name}")
+    evaluator = OptimizedBatchProbeEvaluator(
         model_name=args.model_name,
-        probe_path=args.probe_path,
-        layer=args.layer,
-        device=args.device,
-        batch_size=args.batch_size
+        device=args.device
     )
     
+    # Evaluate probe
+    print(f"\nEvaluating probe from layer {args.layer}")
+    probe_configs = {(args.layer, probe.__class__.__name__): probe}
+    results = evaluator.evaluate_all_probes(
+        texts=conversations,
+        labels=labels,
+        probe_configs=probe_configs
+    )
+    
+    # Print metrics
+    probe_key = (args.layer, probe.__class__.__name__)
+    metrics = results[probe_key]['metrics']
+    print("\nProbe Performance Metrics:")
+    print(f"AUROC: {metrics['auroc']:.4f}")
+    print(f"Accuracy: {metrics['accuracy']:.4f}")
+    print(f"F1 Score: {metrics['f1']:.4f}")
+    print(f"Precision: {metrics['precision']:.4f}")
+    print(f"Recall: {metrics['recall']:.4f}")
+    
+    # Get token scores from results
+    scores = []
+    for sample in results[probe_key]['all_samples']:
+        scores.append(sample['token_scores'])
+    
     # Add scores to data
-    print("Adding scores to data")
+    print("\nAdding scores to data")
     probe_name = Path(args.probe_path).stem
     for item, score_list in zip(data, scores):
-        if 'probe_scores' not in item:
-            item['probe_scores'] = {}
-        item['probe_scores'][f"{probe_name}_layer{args.layer}"] = score_list
+        item['token_scores'] = score_list
+        item['probe_name'] = probe_name
+        item['layer'] = args.layer
     
     # Save augmented data
-    print(f"Saving augmented data to {output_file}")
+    print(f"\nSaving results to {output_file}")
     save_jsonl(data, output_file)
-    print("Done!")
 
 if __name__ == "__main__":
     main() 
