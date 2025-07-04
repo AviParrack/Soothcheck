@@ -145,6 +145,23 @@ def get_output_path(input_path: str, output_dir: str, num_samples: Optional[int]
         return str(Path(output_dir) / f"scored_{dataset_name}_{num_samples}samples.jsonl")
     return str(Path(output_dir) / f"scored_{dataset_name}.jsonl")
 
+def convert_label_to_binary(label: str) -> int:
+    """Convert text label to binary value.
+    
+    Args:
+        label: Text label from the dataset
+        
+    Returns:
+        1 for deceptive/lie labels, 0 for honest/truth labels, -1 for skip/unknown
+    """
+    label = str(label).lower().strip()
+    if label in ['deceptive', 'lie', 'lies', 'false']:
+        return 1
+    elif label in ['honest', 'truth', 'true']:
+        return 0
+    else:
+        return -1  # Skip/unknown label
+
 def main():
     parser = argparse.ArgumentParser(description="Apply probes to B2W data")
     parser.add_argument("--input_file", type=str, required=True,
@@ -179,10 +196,21 @@ def main():
     data = load_jsonl(args.input_file, args.num_samples)
     print(f"Loaded {len(data)} samples")
     
-    # Extract conversations and labels
-    print("Extracting conversations")
+    # Extract conversations and convert labels
+    print("Extracting conversations and converting labels")
     conversations = extract_conversations(data)
-    labels = [item.get('label', 0) for item in data]  # Default to 0 if no label
+    labels = [convert_label_to_binary(item.get('label', 'skip')) for item in data]
+    
+    # Filter out skipped samples
+    valid_indices = [i for i, label in enumerate(labels) if label != -1]
+    if len(valid_indices) < len(labels):
+        print(f"Filtered out {len(labels) - len(valid_indices)} samples with skip/unknown labels")
+        conversations = [conversations[i] for i in valid_indices]
+        labels = [labels[i] for i in valid_indices]
+        data = [data[i] for i in valid_indices]
+    
+    print(f"Processing {len(conversations)} valid samples")
+    print(f"Label distribution: {sum(labels)} deceptive, {len(labels) - sum(labels)} honest")
     
     # Load probe
     print(f"\nInitializing probe from {args.probe_path}")
