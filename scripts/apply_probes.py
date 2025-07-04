@@ -53,10 +53,10 @@ def load_probe(probe_path: str, device: str) -> BaseProbe:
         probe = BaseProbe.load_json(probe_path)
     else:
         # Load PT file (NTML format)
-        state = torch.load(probe_path)
+        state = torch.load(probe_path, map_location=device)
         # NTML probes are always LogisticProbe
-        probe = LogisticProbe(config=state['config'])
-        probe.load_state_dict(state['state_dict'])
+        probe = LogisticProbe(input_size=state['model_config']['input_size'])
+        probe.load_state_dict(state['model_state_dict'])
     
     probe.to(device)
     return probe
