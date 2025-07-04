@@ -9,7 +9,7 @@ from tqdm import tqdm
 import hashlib
 
 from probity.collection.activation_store import ActivationStore
-
+from probity.utils.dataset_loading import load_lie_truth_dataset, get_model_dtype
 from probity.training.configs import (
     get_probe_config,
     get_probe_class,
@@ -17,7 +17,6 @@ from probity.training.configs import (
     get_trainer_class
 )
 from probity.utils.caching import get_dataset_hash, smart_cache_activations
-from probity.utils.dataset_loading import load_lie_truth_dataset, get_model_dtype
 
 
 def train_all_probes_for_layer(layer: int, activation_store: ActivationStore, 

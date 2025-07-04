@@ -202,7 +202,7 @@ class ConversationalProbingDataset(ProbingDataset):
                             label=int(ex.statement_labels[statement_idx]),
                             label_text=str(ex.statement_labels[statement_idx]),
                             character_positions=CharacterPositions({
-                                "target": Position(*ex.statement_positions[statement_idx])
+                                "LIE_SPAN": Position(*ex.statement_positions[statement_idx])
                             }),
                             group_id=ex.group_id,
                             attributes={
@@ -238,7 +238,7 @@ class ConversationalProbingDataset(ProbingDataset):
                             label=int(label),
                             label_text=str(label),
                             character_positions=CharacterPositions({
-                                "target": Position(*pos)
+                                "LIE_SPAN": Position(*pos)
                             }),
                             group_id=f"{ex.group_id}_stmt_{i}",
                             attributes={
