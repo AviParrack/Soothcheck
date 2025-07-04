@@ -187,8 +187,11 @@ class OptimizedBatchProbeEvaluator:
                         print(f"Text {len(all_tokens)}: {len(token_texts)} tokens")
                         print(f"  First 5: {token_texts[:5]}")
                         print(f"  Last 5: {token_texts[-5:]}")
+                        # Find EOS positions if any
+                        eos_positions = torch.where(text_tokens == tokenizer.eos_token_id)[0]
                         if len(eos_positions) > 0:
                             print(f"  EOS positions: {eos_positions.tolist()}")
+                            content_end_pos = eos_positions[0].item()
                             print(f"  Content end position: {content_end_pos}")
 
         # Since batches may have different padding lengths, we need to pad all to the same length
