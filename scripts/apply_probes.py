@@ -10,7 +10,7 @@ from pathlib import Path
 from tqdm import tqdm
 from typing import Dict, List, Optional
 
-from probity.probes import BaseProbe
+from probity.probes import BaseProbe, LogisticProbe
 from probity.evaluation.batch_evaluator import OptimizedBatchProbeEvaluator
 from probity.utils.dataset_loading import get_model_dtype
 
@@ -52,17 +52,14 @@ def load_probe(probe_path: str, device: str) -> BaseProbe:
     if probe_path.endswith('.json'):
         probe = BaseProbe.load_json(probe_path)
     else:
-        # Load PT file
+        # Load PT file (NTML format)
         state = torch.load(probe_path)
-        probe_type = state['probe_type']
-        config = state['config']
-        # Dynamically import the probe class
-        module = __import__('probity.probes', fromlist=[probe_type])
-        probe_class = getattr(module, probe_type)
-        probe = probe_class(config)
+        # NTML probes are always LogisticProbe
+        probe = LogisticProbe(config=state['config'])
         probe.load_state_dict(state['state_dict'])
     
-    return probe.to(device)
+    probe.to(device)
+    return probe
 
 def apply_probe(
     conversations: List[str],
