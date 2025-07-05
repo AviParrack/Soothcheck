@@ -10,6 +10,7 @@ from pathlib import Path
 from tqdm import tqdm
 from typing import Dict, List, Optional
 import datetime
+import re
 
 from probity.probes import BaseProbe, LogisticProbe, LogisticProbeConfig
 from probity.evaluation.batch_evaluator import OptimizedBatchProbeEvaluator
@@ -57,8 +58,19 @@ def extract_conversations(data: List[Dict]) -> List[Dict[str, str]]:
             conv = ""
             messages = branch_data.get('messages', [])
             for msg in messages:
+                # Clean malformed characters from message content IMMEDIATELY when reading from JSON
+                content = msg['content']
+                
+                # Fix malformed character encoding - these should be newlines
+                content = content.replace('ÄĬ', '\n')  # Combined sequence
+                content = content.replace('Ä', '\n')   # Separate Ä character  
+                content = content.replace('Ĭ', '\n')   # Separate Ĭ character
+                
+                # Clean up multiple consecutive newlines
+                content = re.sub(r'\n+', '\n', content)
+                
                 # Include all messages, including system messages
-                conv += f"{msg['role']}: {msg['content']}\n"
+                conv += f"{msg['role']}: {content}\n"
             conv_dict[branch_name] = conv.strip()
         
         all_conversations.append(conv_dict)
