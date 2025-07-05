@@ -195,32 +195,21 @@ def compute_critical_scores(all_samples, data):
     # Simplified version - just return empty list since we're not using this
     return []
 
+def parse_args():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--input_file", type=str, required=True, help="Path to input JSONL file")
+    parser.add_argument("--model_name", type=str, default="meta-llama/Llama-3.3-70B-Instruct", help="Model name")
+    parser.add_argument("--probe_path", type=str, required=True, help="Path to probe file")
+    parser.add_argument("--layer", type=int, required=True, help="Layer number")
+    parser.add_argument("--batch_size", type=int, default=8, help="Batch size")
+    parser.add_argument("--num_samples", type=int, default=None, help="Number of samples to process")
+    parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu", help="Device to use")
+    parser.add_argument("--context_length", type=int, default=8192, 
+                       help="Context length to use. For Llama-3.3-70B, max is 128000. Larger values use more memory.")
+    return parser.parse_args()
+
 def main():
-    parser = argparse.ArgumentParser(description="Apply probes to B2W data")
-    parser.add_argument("--input_file", type=str, required=True,
-                      help="Path to input B2W JSONL file")
-    parser.add_argument("--output_dir", type=str, default="data/b2w-scores/raw",
-                      help="Directory to save augmented JSONL file (default: data/b2w-scores/raw)")
-    parser.add_argument("--model_name", type=str, required=True,
-                      help="Name of the model to use (e.g., 'Qwen/Qwen2.5-0.5B')")
-    parser.add_argument("--probe_path", type=str, required=True,
-                      help="Path to saved probe")
-    parser.add_argument("--layer", type=int, required=True,
-                      help="Layer number to extract activations from")
-    parser.add_argument("--batch_size", type=int, default=1,
-                      help="Initial batch size for processing (will be reduced if OOM occurs)")
-    parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu",
-                      help="Device to run on (cuda/cpu)")
-    parser.add_argument("--num_samples", type=int, default=None,
-                      help="Number of samples to process (default: all)")
-    parser.add_argument("--threshold", type=float, default=None,
-                      help="Classification threshold (default: auto-computed from score distribution)")
-    parser.add_argument("--debug", action="store_true",
-                      help="Enable detailed debug output")
-    parser.add_argument("--critical_only", action="store_true",
-                      help="Only use critical tokens for final metrics")
-    
-    args = parser.parse_args()
+    args = parse_args()
     
     # Ensure output directory exists
     Path(args.output_dir).mkdir(parents=True, exist_ok=True)
@@ -275,7 +264,8 @@ def main():
     print(f"Initializing evaluator with model {args.model_name}")
     evaluator = OptimizedBatchProbeEvaluator(
         model_name=args.model_name,
-        device=args.device
+        device=args.device if torch.cuda.is_available() else "cpu",
+        context_length=args.context_length
     )
     
     # Process each conversation branch
