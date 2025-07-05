@@ -92,12 +92,33 @@ class OptimizedBatchProbeEvaluator:
         print(f"Text length: {len(conversation_text)}")
         print(f"First 500 chars: {repr(conversation_text[:500])}")
         
-        # Text should already be cleaned at this point
+        # Clean ALL malformed characters FIRST before any processing
+        # Handle both separate Ä and Ĭ characters AND combined ÄĬ sequences
+        cleaned_conversation = conversation_text
+        
+        # Fix the specific ÄĬ issue - these are malformed newlines
+        cleaned_conversation = cleaned_conversation.replace('ÄĬ', '\n')
+        
+        # Also handle separate Ä and Ĭ characters that should be newlines
+        cleaned_conversation = cleaned_conversation.replace('Ä', '\n').replace('Ĭ', '\n')
+        
+        # Clean up multiple consecutive newlines that might result from the above
+        import re
+        cleaned_conversation = re.sub(r'\n+', '\n', cleaned_conversation)
+        
+        print(f"DEBUG: After character cleaning:")
+        print(f"Text length: {len(cleaned_conversation)}")
+        print(f"First 500 chars: {repr(cleaned_conversation[:500])}")
+        print(f"Cleaned {conversation_text.count('ÄĬ')} ÄĬ sequences")
+        print(f"Cleaned {conversation_text.count('Ä')} Ä characters")
+        print(f"Cleaned {conversation_text.count('Ĭ')} Ĭ characters")
+        
+        # Now parse the cleaned text
         messages = []
         current_role = None
         current_content = []
         
-        lines = conversation_text.strip().split('\n')
+        lines = cleaned_conversation.strip().split('\n')
         print(f"DEBUG: Split into {len(lines)} lines")
         
         # Skip system message since chat template will add its own
@@ -127,8 +148,8 @@ class OptimizedBatchProbeEvaluator:
                     # Save previous message if exists (and not skipped system)
                     if current_role is not None and current_content and current_role != 'system':
                         content = '\n'.join(current_content).strip()
-                        # Clean any remaining ÄĬ characters from the content
-                        content = content.replace('ÄĬ', '\n')
+                        # Content should already be cleaned, but double-check
+                        content = content.replace('ÄĬ', '\n').replace('Ä', '\n').replace('Ĭ', '\n')
                         messages.append({
                             "role": current_role,
                             "content": content
@@ -151,8 +172,8 @@ class OptimizedBatchProbeEvaluator:
         # Add final message (if not skipped system)
         if current_role is not None and current_content and current_role != 'system':
             content = '\n'.join(current_content).strip()
-            # Clean any remaining ÄĬ characters from the content
-            content = content.replace('ÄĬ', '\n')
+            # Content should already be cleaned, but double-check
+            content = content.replace('ÄĬ', '\n').replace('Ä', '\n').replace('Ĭ', '\n')
             messages.append({
                 "role": current_role,
                 "content": content
@@ -237,25 +258,12 @@ Code Solution: """
                 # Reconstruct exact original formatting (no chat template)
                 formatted_texts = []
                 for idx, text in enumerate(batch_texts):
-                    # Clean malformed characters FIRST - handle multiple types of encoding issues
-                    cleaned_text = text
-                    
-                    # Fix the specific ÄĬ issue - these are malformed newlines
-                    cleaned_text = cleaned_text.replace('ÄĬ', '\n')
-                    
-                    # Also handle other potential encoding issues
-                    cleaned_text = cleaned_text.replace('Ä', '\n').replace('Ĭ', '\n')
-                    
-                    # Clean up multiple consecutive newlines that might result from the above
-                    import re
-                    cleaned_text = re.sub(r'\n+', '\n', cleaned_text)
-                    
-                    print(f"DEBUG: Processing sample {idx}: Cleaned {text.count('ÄĬ')} ÄĬ sequences from input text")
+                    print(f"DEBUG: Processing sample {idx}")
                     print(f"DEBUG: Sample {idx} first 200 chars: {repr(text[:200])}")
-                    print(f"DEBUG: Sample {idx} after cleaning: {repr(cleaned_text[:200])}")
                     
                     # Reconstruct the original Llama format manually
-                    formatted_text = self._reconstruct_original_format(cleaned_text)
+                    # Character cleaning now happens inside _parse_conversation_to_messages
+                    formatted_text = self._reconstruct_original_format(text)
                     formatted_texts.append(formatted_text)
                 
                 # Tokenize with chat template applied (matches old pipeline)
