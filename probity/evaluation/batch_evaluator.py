@@ -94,11 +94,10 @@ class OptimizedBatchProbeEvaluator:
         all_activations = {layer: [] for layer in layers}
         all_tokens = []
         
+        num_batches = (len(texts) + batch_size - 1) // batch_size
         with torch.no_grad():
-            for i in range(0, len(texts), batch_size):
+            for i in tqdm(range(0, len(texts), batch_size), total=num_batches, desc="Processing batches"):
                 batch_texts = texts[i:i + batch_size]
-                
-                print(f"Processing batch {i//batch_size + 1}/{(len(texts) + batch_size - 1)//batch_size}")
                 
                 # Tokenize batch
                 tokens = tokenizer(
@@ -108,8 +107,6 @@ class OptimizedBatchProbeEvaluator:
                     truncation=False,  # No truncation
                     add_special_tokens=False  # Texts already have special tokens
                 ).to(self.device)
-                
-                print(f"Batch tokenized shape: {tokens['input_ids'].shape}")
                 
                 # Run model with caching
                 _, cache = self.model.run_with_cache(
@@ -313,7 +310,7 @@ class OptimizedBatchProbeEvaluator:
         
         with torch.no_grad():
             # Process each text individually to handle variable lengths properly
-            for i, (text, true_label) in enumerate(zip(texts, labels)):
+            for i, (text, true_label) in tqdm(enumerate(zip(texts, labels)), total=len(texts), desc="Processing texts"):
                 # Get tokens and actual length for this text
                 tokens = tokens_by_text[i]
                 actual_length = len(tokens)
