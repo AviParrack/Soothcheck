@@ -75,19 +75,69 @@ class OptimizedBatchProbeEvaluator:
             print(f"Sample text length: {len(sample_text)}")
             print(f"Sample text end: ...{sample_text[-100:]}")
             
-            # Test different tokenization approaches
-            single_tokens1 = tokenizer(sample_text, return_tensors="pt", add_special_tokens=False)
-            single_tokens2 = tokenizer(sample_text, return_tensors="pt", add_special_tokens=True)
+            # Add special tokens to match original format
+            def add_special_tokens(text):
+                # Add special tokens to match original format
+                parts = []
+                parts.append("<|begin_of_text|>")
+                
+                # Split text into role-content pairs
+                lines = text.split('\n')
+                current_role = None
+                current_content = []
+                
+                for line in lines:
+                    if line.strip() == '':
+                        continue
+                    if ':' in line:
+                        # If we have a previous role, add it
+                        if current_role:
+                            parts.append("<|start_header_id|>")
+                            parts.append(current_role)
+                            parts.append("<|end_header_id|>")
+                            parts.append('\n\n')
+                            parts.append('\n'.join(current_content))
+                            parts.append("<|eot_id|>")
+                            current_content = []
+                        
+                        # Start new role
+                        role, content = line.split(':', 1)
+                        current_role = role.strip()
+                        if content.strip():
+                            current_content.append(content.strip())
+                    else:
+                        if current_content or line.strip():
+                            current_content.append(line.strip())
+                
+                # Add the last role if exists
+                if current_role:
+                    parts.append("<|start_header_id|>")
+                    parts.append(current_role)
+                    parts.append("<|end_header_id|>")
+                    parts.append('\n\n')
+                    parts.append('\n'.join(current_content))
+                    parts.append("<|eot_id|>")
+                
+                return ' '.join(parts)
             
-            print(f"Without add_special_tokens: {single_tokens1['input_ids'].shape}")
-            print(f"With add_special_tokens: {single_tokens2['input_ids'].shape}")
+            # Test tokenization with special tokens
+            modified_texts = [add_special_tokens(text) for text in texts]
             
-            # Decode the end of both
-            tokens1 = single_tokens1['input_ids'][0]
-            tokens2 = single_tokens2['input_ids'][0]
+            # Debug first text
+            print("\nOriginal text:")
+            print(sample_text)
+            print("\nModified text:")
+            print(modified_texts[0])
             
-            print(f"Last 10 tokens (no special): {tokenizer.convert_ids_to_tokens(tokens1[-10:])}")
-            print(f"Last 10 tokens (with special): {tokenizer.convert_ids_to_tokens(tokens2[-10:])}")
+            # Test tokenization
+            test_tokens = tokenizer(
+                modified_texts[0],
+                return_tensors="pt",
+                add_special_tokens=False  # We added them manually
+            )
+            print("\nTokenization result:")
+            print(f"Token count: {test_tokens['input_ids'].shape[1]}")
+            print("Tokens:", tokenizer.convert_ids_to_tokens(test_tokens['input_ids'][0]))
             print("=== END DEBUG ===\n")
         
         # Process in batches
@@ -97,7 +147,7 @@ class OptimizedBatchProbeEvaluator:
         num_batches = (len(texts) + batch_size - 1) // batch_size
         with torch.no_grad():
             for i in tqdm(range(0, len(texts), batch_size), total=num_batches, desc="Processing batches"):
-                batch_texts = texts[i:i + batch_size]
+                batch_texts = modified_texts[i:i + batch_size]
                 
                 # Tokenize batch
                 tokens = tokenizer(
@@ -105,7 +155,7 @@ class OptimizedBatchProbeEvaluator:
                     return_tensors="pt", 
                     padding=True,  # Pad to longest in batch
                     truncation=False,  # No truncation
-                    add_special_tokens=False  # Texts already have special tokens
+                    add_special_tokens=False  # We added them manually
                 ).to(self.device)
                 
                 # Run model with caching
