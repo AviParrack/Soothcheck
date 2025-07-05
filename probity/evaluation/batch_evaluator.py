@@ -114,11 +114,12 @@ class OptimizedBatchProbeEvaluator:
                     # Store activations for each layer - move to CPU immediately
                     for layer in layers:
                         hook_point = f"blocks.{layer}.hook_resid_pre"
+                        # Get activations and move to CPU
                         layer_activations = cache[hook_point].cpu()
                         all_activations[layer].append(layer_activations)
-                        del cache[hook_point]  # Free memory
                     
-                    del cache  # Free memory
+                    # Clear cache reference
+                    del cache
                     
                     # Store tokens
                     for j, text in enumerate(batch_texts):
@@ -167,28 +168,50 @@ class OptimizedBatchProbeEvaluator:
         max_seq_len = max(batch.shape[1] for layer in layers for batch in all_activations[layer])
         print(f"Maximum sequence length across all batches: {max_seq_len}")
         
-        # Pad all batches to the same length
+        # Process each layer separately to manage memory
         final_activations = {}
         for layer in layers:
+            print(f"\nProcessing layer {layer} final activations...")
             padded_batches = []
+            
+            # Process each batch
             for batch_activations in all_activations[layer]:
                 batch_size, seq_len, hidden_size = batch_activations.shape
                 if seq_len < max_seq_len:
                     padding = torch.zeros(
                         batch_size, max_seq_len - seq_len, hidden_size, 
-                        dtype=batch_activations.dtype, device=batch_activations.device
+                        dtype=batch_activations.dtype, device='cpu'  # Keep on CPU
                     )
                     padded_batch = torch.cat([batch_activations, padding], dim=1)
                 else:
                     padded_batch = batch_activations
                 padded_batches.append(padded_batch)
             
-            # Move back to GPU only when concatenating
-            final_activations[layer] = torch.cat([batch.to(self.device) for batch in padded_batches], dim=0)
+            # Move to GPU and concatenate in chunks if needed
+            chunk_size = 2  # Process 2 batches at a time
+            final_chunks = []
+            
+            for chunk_start in range(0, len(padded_batches), chunk_size):
+                chunk_end = min(chunk_start + chunk_size, len(padded_batches))
+                chunk_batches = padded_batches[chunk_start:chunk_end]
+                
+                # Move chunk to GPU and concatenate
+                gpu_chunk = torch.cat([batch.to(self.device) for batch in chunk_batches], dim=0)
+                final_chunks.append(gpu_chunk)
+                
+                # Clear chunk batches
+                del chunk_batches
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+            
+            # Final concatenation of chunks
+            final_activations[layer] = torch.cat(final_chunks, dim=0)
             
             # Clear intermediate results
             del padded_batches
-            del all_activations[layer]
+            del final_chunks
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
         
         # Clear more memory
         del all_activations
