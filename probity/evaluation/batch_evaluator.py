@@ -39,7 +39,7 @@ class OptimizedBatchProbeEvaluator:
         # For Llama 3.3 models, we need to configure RoPE scaling properly
         if "Llama-3.3" in model_name:
             print("Configuring Llama 3.3 with extended context window using RoPE scaling...")
-            from transformers import AutoConfig, AutoModelForCausalLM
+            from transformers import AutoConfig
             
             # Load config and modify for extended context
             config = AutoConfig.from_pretrained(model_name)
@@ -55,20 +55,12 @@ class OptimizedBatchProbeEvaluator:
             print(f"RoPE scaling factor: {config.rope_scaling['factor']}")
             print(f"Effective context window: ~{int(config.max_position_embeddings * config.rope_scaling['factor'])}")
             
-            # Load model with extended config using transformers
-            hf_model = AutoModelForCausalLM.from_pretrained(
-                model_name,
-                config=config,
-                torch_dtype=self.model_dtype,
-                device_map=device
-            )
-            
-            # Convert to HookedTransformer
+            # Load model directly with HookedTransformer but pass the modified config
             self.model = HookedTransformer.from_pretrained_no_processing(
                 model_name,
-                hf_model=hf_model,
                 device=device,
                 dtype=self.model_dtype,
+                hf_cfg=config,  # Pass the modified config
             )
         else:
             # Load normally for other models
