@@ -10,7 +10,6 @@ from pathlib import Path
 from tqdm import tqdm
 from typing import Dict, List, Optional
 import datetime
-import sys
 
 from probity.probes import BaseProbe, LogisticProbe, LogisticProbeConfig
 from probity.evaluation.batch_evaluator import OptimizedBatchProbeEvaluator
@@ -42,10 +41,9 @@ def extract_conversations(data: List[Dict]) -> List[str]:
     """Extract conversation text from messages."""
     conversations = []
     for item in data:
-        # Get messages from the nested structure
+        # Combine messages into a single string
         conversation = ""
-        messages = item.get('conversations', {}).get('main', {}).get('messages', [])
-        for msg in messages:
+        for msg in item.get('messages', []):
             role = msg.get('role', '')
             content = msg.get('content', '')
             conversation += f"{role}: {content}\n"
@@ -105,41 +103,45 @@ def apply_probe(
     layer_activations = activation_data['activations'][layer]
     
     probe_scores = []
-    print("\nProcessing samples:")
-    for i, text in tqdm(enumerate(conversations), total=len(conversations), desc="Processing samples"):
-        # Get tokens and actual length for this text
-        tokens = activation_data['tokens_by_text'][i]
-        actual_length = len(tokens)
-        
-        # Get activations for this text (up to actual length)
-        text_activations = layer_activations[i, :actual_length, :].to(device)
-        
-        # Apply probe to all tokens for this text
-        token_scores = probe(text_activations)
-        
-        # Apply sigmoid for LogisticProbe
-        if probe.__class__.__name__ == 'LogisticProbe':
-            token_scores = torch.sigmoid(token_scores)
-        
-        # Convert to list
-        token_scores_list = token_scores.cpu().squeeze().tolist()
-        
-        # Handle single token case
-        if isinstance(token_scores_list, float):
-            token_scores_list = [token_scores_list]
-        
-        # Calculate mean score
-        mean_score = sum(token_scores_list) / len(token_scores_list)
-        
-        # Print progress for each sample
-        print(f"\nSample {i+1}/{len(conversations)}:")
-        print(f"  Text length: {len(text)} chars, {actual_length} tokens")
-        print(f"  Mean probe score: {mean_score:.4f}")
-        print(f"  Prediction: {'deceptive' if mean_score > 0.5 else 'honest'}")
-        print(f"  First 50 chars: {text[:50]}...")
-        
-        # Add the full list of token scores
-        probe_scores.append(token_scores_list)
+    with torch.no_grad():
+        for i, text in enumerate(conversations):
+            print(f"\nProcessing conversation {i+1}/{len(conversations)}")
+            print(f"Text length: {len(text)} chars")
+            
+            # Get tokens and actual length for this text
+            tokens = activation_data['tokens_by_text'][i]
+            actual_length = len(tokens)
+            print(f"Token count: {actual_length}")
+            print(f"First 50 chars: {text[:50]}...")
+            
+            # Get activations for this text (up to actual length)
+            text_activations = layer_activations[i, :actual_length, :].to(device)
+            print(f"Activation shape: {text_activations.shape}")
+            
+            # Apply probe to all tokens for this text
+            token_scores = probe(text_activations)
+            
+            # Apply sigmoid for LogisticProbe
+            if probe.__class__.__name__ == 'LogisticProbe':
+                token_scores = torch.sigmoid(token_scores)
+            
+            # Convert to list
+            token_scores_list = token_scores.cpu().squeeze().tolist()
+            
+            # Handle single token case
+            if isinstance(token_scores_list, float):
+                token_scores_list = [token_scores_list]
+            
+            # Calculate and print mean score
+            mean_score = sum(token_scores_list) / len(token_scores_list)
+            print(f"Mean probe score: {mean_score:.4f}")
+            print(f"Prediction: {'deceptive' if mean_score > 0.5 else 'honest'}")
+            
+            # Add the full list of token scores
+            probe_scores.append(token_scores_list)
+            
+            # Print separator
+            print("-" * 80)
     
     print("\nFinished processing all conversations")
     return probe_scores
@@ -178,11 +180,11 @@ def compute_critical_scores(all_samples, data):
     """Compute mean scores for critical tokens only."""
     critical_scores = []
     for sample, item in zip(all_samples, data):
-        # Get critical indices from conversations.main
-        if 'conversations' not in item or 'main' not in item['conversations'] or not item['conversations']['main'].get('critical_indices'):
+        # Get critical indices from token_analysis
+        if 'token_analysis' not in item or not item['token_analysis'].get('critical_indices'):
             continue
             
-        critical_indices = item['conversations']['main']['critical_indices']
+        critical_indices = item['token_analysis']['critical_indices']
         if not critical_indices:
             continue
             
@@ -193,7 +195,7 @@ def compute_critical_scores(all_samples, data):
                 'mean_score': float(sum(critical_token_scores) / len(critical_token_scores)),
                 'token_scores': critical_token_scores,
                 'indices': critical_indices,
-                'tokens': [sample['tokens'][i] for i in critical_indices if i < len(sample['tokens'])]
+                'tokens': [item['token_analysis']['tokens'][i] for i in critical_indices if i < len(item['token_analysis']['tokens'])]
             })
         
     return critical_scores
@@ -244,7 +246,7 @@ def main():
     
     # Print raw labels before conversion
     print("\nRaw labels before conversion:")
-    for i, item in tqdm(enumerate(data), desc="Converting labels"):
+    for i, item in enumerate(data):
         label = item.get('metadata', {}).get('label', 'skip')
         print(f"Sample {i}: {label}")
     
@@ -284,12 +286,6 @@ def main():
     # Evaluate probe
     print(f"\nEvaluating probe from layer {args.layer}")
     probe_configs = {(args.layer, probe.__class__.__name__): probe}
-    
-    # Add progress tracking for sample processing
-    print("\nProcessing samples...")
-    total_samples = len(conversations)
-    processed = 0
-    
     results = evaluator.evaluate_all_probes(
         texts=conversations,
         labels=labels,
@@ -306,7 +302,7 @@ def main():
     honest_scores = []
     deceptive_scores = []
     
-    for i, (sample, label) in tqdm(enumerate(zip(all_samples, labels)), total=len(all_samples), desc="Analyzing samples"):
+    for i, (sample, label) in enumerate(zip(all_samples, labels)):
         score = sample['mean_score']
         if label == 1:
             deceptive_scores.append(score)
@@ -344,12 +340,6 @@ def main():
     if critical_results:
         print(f"\nFound critical tokens in {len(critical_results)} samples")
         critical_mean_scores = [r['mean_score'] for r in critical_results]
-        critical_labels = []
-        
-        # Get corresponding labels for samples with critical tokens
-        for result in critical_results:
-            sample_idx = result['idx']
-            critical_labels.append(labels[sample_idx])
         
         print("\nCritical token score distribution:")
         print(f"  Min score: {min(critical_mean_scores):.4f}")
@@ -359,23 +349,18 @@ def main():
         # Detailed per-sample critical analysis
         print("\nPer-sample critical token analysis:")
         for i, result in enumerate(critical_results):
-            print(f"\nSample {result['idx']}:")
+            print(f"\nSample {i}:")
             print(f"  Critical token count: {len(result['indices'])}")
             print(f"  Critical tokens: {' '.join(result['tokens'])}")
             print(f"  Mean critical score: {result['mean_score']:.4f}")
             print(f"  Score range: {min(result['token_scores']):.4f} - {max(result['token_scores']):.4f}")
-            print(f"  True label: {critical_labels[i]} ({'deceptive' if critical_labels[i] == 1 else 'honest'})")
         
-        # If using critical tokens only, update mean_scores and labels
+        # If using critical tokens only, update mean_scores
         if args.critical_only:
             print("\nUsing critical tokens only for final metrics")
             mean_scores = critical_mean_scores
-            labels = critical_labels
     else:
         print("No critical token information found in the dataset")
-        if args.critical_only:
-            print("Cannot proceed with critical_only=True as no critical tokens were found")
-            sys.exit(1)
     
     # Calculate optimal threshold if not provided
     if args.threshold is None:
@@ -412,12 +397,43 @@ def main():
     print(f"  False Negatives (deceptive misclassified as honest): {fn}")
     print(f"  True Negatives (honest correctly identified): {tn}")
     
+    metrics = {
+        'accuracy': float(accuracy_score(labels, predictions)),
+        'precision': float(precision_score(labels, predictions)),
+        'recall': float(recall_score(labels, predictions)),
+        'f1': float(f1_score(labels, predictions)),
+        'auroc': float(roc_auc_score(labels, mean_scores))
+    }
+    
     print("\nProbe Performance Metrics:")
-    print(f"AUROC: {roc_auc_score(labels, mean_scores):.4f}")
-    print(f"Accuracy: {accuracy_score(labels, predictions):.4f}")
-    print(f"F1 Score: {f1_score(labels, predictions):.4f}")
-    print(f"Precision: {precision_score(labels, predictions):.4f}")
-    print(f"Recall: {recall_score(labels, predictions):.4f}")
+    print(f"AUROC: {metrics['auroc']:.4f}")
+    print(f"Accuracy: {metrics['accuracy']:.4f}")
+    print(f"F1 Score: {metrics['f1']:.4f}")
+    print(f"Precision: {metrics['precision']:.4f}")
+    print(f"Recall: {metrics['recall']:.4f}")
+    
+    # Add critical AUROC if available
+    if critical_results:
+        # Get labels for samples with critical tokens
+        critical_sample_indices = [i for i, item in enumerate(data) if 'critical_analysis' in item and 
+                                isinstance(item['critical_analysis'], dict) and 
+                                item['critical_analysis'].get('critical_token_indices')]
+        critical_labels = [labels[i] for i in critical_sample_indices]
+        
+        critical_metrics = {
+            'accuracy': float(accuracy_score(critical_labels, [1 if s > threshold else 0 for s in critical_mean_scores])),
+            'precision': float(precision_score(critical_labels, [1 if s > threshold else 0 for s in critical_mean_scores])),
+            'recall': float(recall_score(critical_labels, [1 if s > threshold else 0 for s in critical_mean_scores])),
+            'f1': float(f1_score(critical_labels, [1 if s > threshold else 0 for s in critical_mean_scores])),
+            'auroc': float(roc_auc_score(critical_labels, critical_mean_scores))
+        }
+        
+        print("\nCritical Tokens Only - Probe Performance Metrics:")
+        print(f"AUROC: {critical_metrics['auroc']:.4f}")
+        print(f"Accuracy: {critical_metrics['accuracy']:.4f}")
+        print(f"F1 Score: {critical_metrics['f1']:.4f}")
+        print(f"Precision: {critical_metrics['precision']:.4f}")
+        print(f"Recall: {critical_metrics['recall']:.4f}")
     
     # Add scores to data
     print("\nAdding scores to data")
