@@ -36,12 +36,48 @@ class OptimizedBatchProbeEvaluator:
         self.model_dtype = get_model_dtype(model_name)
         print(f"Using model dtype: {self.model_dtype}")
         
-        # Load the model normally - HookedTransformer should handle the context window automatically
-        self.model = HookedTransformer.from_pretrained_no_processing(
-            model_name,
-            device=device,
-            dtype=self.model_dtype,
-        )
+        # For Llama 3.3 models, we need to configure RoPE scaling properly
+        if "Llama-3.3" in model_name:
+            print("Configuring Llama 3.3 with extended context window using RoPE scaling...")
+            from transformers import AutoConfig, AutoModelForCausalLM
+            
+            # Load config and modify for extended context
+            config = AutoConfig.from_pretrained(model_name)
+            
+            # Configure RoPE scaling for extended context
+            # Use dynamic scaling which is effective for Llama models
+            config.rope_scaling = {
+                'type': 'dynamic',
+                'factor': 8.0  # This extends context from ~16k to ~128k
+            }
+            
+            print(f"Original max_position_embeddings: {config.max_position_embeddings}")
+            print(f"RoPE scaling factor: {config.rope_scaling['factor']}")
+            print(f"Effective context window: ~{int(config.max_position_embeddings * config.rope_scaling['factor'])}")
+            
+            # Load model with extended config using transformers
+            hf_model = AutoModelForCausalLM.from_pretrained(
+                model_name,
+                config=config,
+                torch_dtype=self.model_dtype,
+                device_map=device
+            )
+            
+            # Convert to HookedTransformer
+            self.model = HookedTransformer.from_pretrained_no_processing(
+                model_name,
+                hf_model=hf_model,
+                device=device,
+                dtype=self.model_dtype,
+            )
+        else:
+            # Load normally for other models
+            self.model = HookedTransformer.from_pretrained_no_processing(
+                model_name,
+                device=device,
+                dtype=self.model_dtype,
+            )
+        
         self.model.eval()
         
         # Check the model's actual context window
