@@ -27,16 +27,14 @@ from probity.utils.dataset_loading import get_model_dtype
 class OptimizedBatchProbeEvaluator:
     """Optimized evaluator that runs model once and applies all probes"""
     
-    def __init__(self, model_name: str, device: str, context_length: int = 8192):
+    def __init__(self, model_name: str, device: str):
         self.device = device
         self.model_name = model_name
-        self.context_length = context_length
         
         # Load model once
         print(f"Loading model {model_name}")
         self.model_dtype = get_model_dtype(model_name)
         print(f"Using model dtype: {self.model_dtype}")
-        print(f"Using context length: {context_length}")
         
         self.model = HookedTransformer.from_pretrained_no_processing(
             model_name,
@@ -66,6 +64,10 @@ class OptimizedBatchProbeEvaluator:
             from transformers import AutoTokenizer
             tokenizer = AutoTokenizer.from_pretrained(self.model.cfg.model_name)
         
+        # Set larger context window
+        max_model_length = 4096  # Increased context window
+        print(f"Using sequence length: {max_model_length}")
+        
         # Process in smaller batches with memory cleanup
         all_activations = {layer: [] for layer in layers}
         all_tokens = []
@@ -92,14 +94,6 @@ class OptimizedBatchProbeEvaluator:
                     truncation=False,
                     add_special_tokens=False
                 ).to(self.device)
-                
-                # Check sequence length
-                seq_len = tokens["input_ids"].shape[1]
-                if seq_len > self.context_length:
-                    print(f"\nWARNING: Sequence length {seq_len} exceeds specified context length {self.context_length}")
-                    if "llama" in self.model_name.lower():
-                        print("Note: Llama-3.3-70B supports up to 128000 tokens. Use --context_length to increase.")
-                    print("Note: Larger context lengths will increase memory usage and processing time")
                 
                 try:
                     # Run model with caching
