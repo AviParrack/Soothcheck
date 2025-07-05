@@ -102,15 +102,18 @@ def apply_probe(
     probe_scores = []
     with torch.no_grad():
         for i, text in enumerate(conversations):
-            if i % 10 == 0:
-                print(f"Processing conversation {i+1}/{len(conversations)}")
+            print(f"\nProcessing conversation {i+1}/{len(conversations)}")
+            print(f"Text length: {len(text)} chars")
             
             # Get tokens and actual length for this text
             tokens = activation_data['tokens_by_text'][i]
             actual_length = len(tokens)
+            print(f"Token count: {actual_length}")
+            print(f"First 50 chars: {text[:50]}...")
             
             # Get activations for this text (up to actual length)
             text_activations = layer_activations[i, :actual_length, :].to(device)
+            print(f"Activation shape: {text_activations.shape}")
             
             # Apply probe to all tokens for this text
             token_scores = probe(text_activations)
@@ -126,8 +129,16 @@ def apply_probe(
             if isinstance(token_scores_list, float):
                 token_scores_list = [token_scores_list]
             
+            # Calculate and print mean score
+            mean_score = sum(token_scores_list) / len(token_scores_list)
+            print(f"Mean probe score: {mean_score:.4f}")
+            print(f"Prediction: {'deceptive' if mean_score > 0.5 else 'honest'}")
+            
             # Add the full list of token scores
             probe_scores.append(token_scores_list)
+            
+            # Print separator
+            print("-" * 80)
     
     print("\nFinished processing all conversations")
     return probe_scores
