@@ -247,15 +247,15 @@ def main():
     # Print raw labels before conversion
     print("\nRaw labels before conversion:")
     for i, item in enumerate(data):
-        label = item.get('label', 'skip')
+        label = item.get('metadata', {}).get('label', 'skip')
         print(f"Sample {i}: {label}")
     
-    labels = [convert_label_to_binary(item.get('label', 'skip')) for item in data]
+    labels = [convert_label_to_binary(item.get('metadata', {}).get('label', 'skip')) for item in data]
     
     # Print converted labels
     print("\nConverted binary labels:")
     for i, (label, orig) in enumerate(zip(labels, data)):
-        print(f"Sample {i}: {orig.get('label', 'skip')} -> {label}")
+        print(f"Sample {i}: {orig.get('metadata', {}).get('label', 'skip')} -> {label}")
     
     # Filter out skipped samples
     valid_indices = [i for i, label in enumerate(labels) if label != -1]
