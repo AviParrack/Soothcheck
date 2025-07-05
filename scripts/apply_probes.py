@@ -64,6 +64,7 @@ def extract_conversations(data: List[Dict]) -> List[Dict[str, str]]:
                 content = original_content
                 
                 # Count malformed characters before cleaning
+                original_c_count = original_content.count('Ċ')  # This is the actual character we need to fix
                 original_a_count = original_content.count('Ä')
                 original_i_count = original_content.count('Ĭ')
                 original_ai_count = original_content.count('ÄĬ')
@@ -71,10 +72,13 @@ def extract_conversations(data: List[Dict]) -> List[Dict[str, str]]:
                 if item_idx == 0 and msg_idx <= 2:  # Debug first few messages
                     print(f"DEBUG: Item {item_idx}, Message {msg_idx} ({msg['role']}):")
                     print(f"  Original content length: {len(original_content)}")
-                    print(f"  Found {original_a_count} 'Ä' chars, {original_i_count} 'Ĭ' chars, {original_ai_count} 'ÄĬ' sequences")
+                    print(f"  Found {original_c_count} 'Ċ' chars, {original_a_count} 'Ä' chars, {original_i_count} 'Ĭ' chars, {original_ai_count} 'ÄĬ' sequences")
                     print(f"  First 200 chars: {repr(original_content[:200])}")
                 
-                # Fix malformed character encoding - these should be newlines
+                # Fix the ACTUAL issue - Ċ characters should be newlines
+                content = content.replace('Ċ', '\n')  # This is the real fix!
+                
+                # Also handle the display corruption we were chasing
                 content = content.replace('ÄĬ', '\n')  # Combined sequence
                 content = content.replace('Ä', '\n')   # Separate Ä character  
                 content = content.replace('Ĭ', '\n')   # Separate Ĭ character
@@ -83,6 +87,7 @@ def extract_conversations(data: List[Dict]) -> List[Dict[str, str]]:
                 content = re.sub(r'\n+', '\n', content)
                 
                 # Count characters after cleaning
+                remaining_c_count = content.count('Ċ')
                 remaining_a_count = content.count('Ä')
                 remaining_i_count = content.count('Ĭ')
                 remaining_ai_count = content.count('ÄĬ')
@@ -90,9 +95,13 @@ def extract_conversations(data: List[Dict]) -> List[Dict[str, str]]:
                 if item_idx == 0 and msg_idx <= 2:  # Debug first few messages
                     print(f"  After cleaning:")
                     print(f"    Content length: {len(content)}")
-                    print(f"    Remaining {remaining_a_count} 'Ä' chars, {remaining_i_count} 'Ĭ' chars, {remaining_ai_count} 'ÄĬ' sequences")
+                    print(f"    Remaining {remaining_c_count} 'Ċ' chars, {remaining_a_count} 'Ä' chars, {remaining_i_count} 'Ĭ' chars, {remaining_ai_count} 'ÄĬ' sequences")
                     print(f"    First 200 chars: {repr(content[:200])}")
-                    print(f"    Characters cleaned: {original_a_count + original_i_count + original_ai_count}")
+                    print(f"    Characters cleaned: {original_c_count + original_a_count + original_i_count + original_ai_count}")
+                    
+                    # Show what the content looks like after Ċ -> \n conversion
+                    print(f"    Content preview after newline conversion:")
+                    print(f"    {repr(content[:300])}")
                 
                 # Include all messages, including system messages
                 conv += f"{msg['role']}: {content}\n"
