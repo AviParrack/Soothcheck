@@ -88,17 +88,27 @@ class OptimizedBatchProbeEvaluator:
         
     def _parse_conversation_to_messages(self, conversation_text: str) -> List[Dict[str, str]]:
         """Parse conversation format into messages for chat template"""
+        print(f"DEBUG: Parsing conversation text:")
+        print(f"Text length: {len(conversation_text)}")
+        print(f"First 200 chars: {repr(conversation_text[:200])}")
+        
         messages = []
         current_role = None
         current_content = []
         
-        for line in conversation_text.strip().split('\n'):
+        lines = conversation_text.strip().split('\n')
+        print(f"DEBUG: Split into {len(lines)} lines")
+        
+        for i, line in enumerate(lines):
             line = line.strip()
             if not line:
                 continue
+            
+            print(f"DEBUG: Line {i}: {repr(line)}")
                 
             # Check if this is a role line (system:, user:, assistant:)
             if line.endswith(':') and line[:-1] in ['system', 'user', 'assistant']:
+                print(f"DEBUG: Found role line: {line}")
                 # Save previous message if exists
                 if current_role is not None and current_content:
                     messages.append({
@@ -113,6 +123,7 @@ class OptimizedBatchProbeEvaluator:
                 # Add to current message content
                 if current_role is not None:
                     current_content.append(line)
+                    print(f"DEBUG: Added to {current_role}: {repr(line)}")
         
         # Add final message
         if current_role is not None and current_content:
@@ -120,6 +131,10 @@ class OptimizedBatchProbeEvaluator:
                 "role": current_role,
                 "content": '\n'.join(current_content).strip()
             })
+        
+        print(f"DEBUG: Parsed {len(messages)} messages:")
+        for i, msg in enumerate(messages):
+            print(f"  Message {i}: role={msg['role']}, content_len={len(msg['content'])}")
         
         return messages
         
