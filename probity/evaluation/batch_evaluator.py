@@ -46,62 +46,9 @@ class OptimizedBatchProbeEvaluator:
         # Cache for activations
         self._activation_cache = {}
         
-    def _find_chunk_boundaries(self, text: str, tokenizer, max_length: int = 2048) -> List[Tuple[int, int]]:
-        """Find natural chunk boundaries in text that respect the max_length constraint.
-        Returns list of (start_idx, end_idx) tuples for token indices."""
-        
-        # First tokenize the entire text without truncation to get full token count
-        tokens = tokenizer(text, add_special_tokens=False, truncation=False)
-        token_ids = tokens['input_ids']
-        
-        # If text fits in one chunk, return it whole
-        if len(token_ids) <= max_length:
-            return [(0, len(token_ids))]
-        
-        # Initialize boundaries
-        chunk_boundaries = []
-        current_start = 0
-        
-        while current_start < len(token_ids):
-            # If remaining tokens fit in max_length, make them the last chunk
-            if len(token_ids) - current_start <= max_length:
-                chunk_boundaries.append((current_start, len(token_ids)))
-                break
-            
-            # Look for a good splitting point within max_length
-            # Start from max possible position and work backwards
-            split_pos = min(current_start + max_length, len(token_ids))
-            best_split = split_pos
-            
-            # Decode a window of tokens around the potential split point
-            window_start = max(0, split_pos - 100)  # Look back up to 100 tokens
-            window_end = min(len(token_ids), split_pos + 100)  # Look ahead up to 100 tokens
-            window_tokens = token_ids[window_start:window_end]
-            window_text = tokenizer.decode(window_tokens)
-            
-            # Find sentence boundaries in the window
-            sentence_ends = []
-            for i, char in enumerate(window_text):
-                if char == '.' and (i == len(window_text) - 1 or window_text[i + 1] in [' ', '\n', '\t']):
-                    # Convert window position to token position
-                    token_pos = window_start + len(tokenizer.encode(window_text[:i+1], add_special_tokens=False))
-                    if token_pos <= split_pos:  # Only consider boundaries before split_pos
-                        sentence_ends.append(token_pos)
-            
-            # If we found sentence boundaries, use the last one before split_pos
-            if sentence_ends:
-                best_split = max(x for x in sentence_ends if x <= split_pos)
-            
-            # Add the chunk and continue
-            chunk_boundaries.append((current_start, best_split))
-            current_start = best_split
-        
-        return chunk_boundaries
-        
     def get_batch_activations(self, texts: List[str], layers: List[int], 
                             batch_size: int = 1) -> Dict[int, torch.Tensor]:
-        """Get activations for all texts and layers efficiently, handling long sequences
-        by splitting at natural boundaries."""
+        """Get activations for all texts and layers efficiently"""
         
         # Create cache key
         cache_key = (tuple(sorted(texts)), tuple(sorted(layers)))
@@ -110,7 +57,7 @@ class OptimizedBatchProbeEvaluator:
         
         hook_points = [f"blocks.{layer}.hook_resid_pre" for layer in layers]
         
-        # Get tokenizer
+        # Tokenize all texts at once
         if hasattr(self.model, 'tokenizer'):
             tokenizer = self.model.tokenizer
         else:
@@ -123,103 +70,94 @@ class OptimizedBatchProbeEvaluator:
         
         # Start with minimal batch size
         actual_batch_size = 1
+        num_batches = (len(texts) + actual_batch_size - 1) // actual_batch_size
         
         with torch.no_grad():
-            for text_idx, text in enumerate(texts):
-                print(f"\nProcessing text {text_idx + 1}/{len(texts)}")
+            for i in tqdm(range(0, len(texts), actual_batch_size), total=num_batches, desc="Processing batches"):
+                # Aggressive memory cleanup before each batch
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                import gc
+                gc.collect()
                 
-                # Find natural chunk boundaries
-                chunk_boundaries = self._find_chunk_boundaries(text, tokenizer)
-                print(f"Split into {len(chunk_boundaries)} chunks")
+                batch_texts = texts[i:i + actual_batch_size]
                 
-                # Process each chunk
-                chunk_tokens = []
-                chunk_activations = {layer: [] for layer in layers}
-                
-                # First tokenize the entire text to get full token sequence
-                full_tokens = tokenizer(
-                    text,
-                    return_tensors="pt",
-                    padding=False,
+                # Tokenize batch
+                tokens = tokenizer(
+                    batch_texts, 
+                    return_tensors="pt", 
+                    padding=True,
                     truncation=False,
+                    max_length=2048,
                     add_special_tokens=False
-                )
+                ).to(self.device)
                 
-                for chunk_idx, (start_idx, end_idx) in enumerate(chunk_boundaries):
-                    print(f"Processing chunk {chunk_idx + 1}/{len(chunk_boundaries)} (tokens {start_idx}-{end_idx})")
+                try:
+                    # Run model with caching
+                    _, cache = self.model.run_with_cache(
+                        tokens["input_ids"],
+                        names_filter=hook_points,
+                        return_cache_object=True,
+                        stop_at_layer=max(layers) + 1
+                    )
                     
-                    # Aggressive memory cleanup before each chunk
+                    # Store activations for each layer - move to CPU immediately
+                    for layer in layers:
+                        hook_point = f"blocks.{layer}.hook_resid_pre"
+                        # Get activations and move to CPU
+                        layer_activations = cache[hook_point].cpu()
+                        all_activations[layer].append(layer_activations)
+                    
+                    # Clear cache reference and force cleanup
+                    del cache
                     if torch.cuda.is_available():
                         torch.cuda.empty_cache()
-                    import gc
                     gc.collect()
                     
-                    # Extract this chunk's tokens
-                    chunk_input_ids = full_tokens["input_ids"][0][start_idx:end_idx].unsqueeze(0)
-                    
-                    try:
-                        # Run model with caching
-                        _, cache = self.model.run_with_cache(
-                            chunk_input_ids.to(self.device),
-                            names_filter=hook_points,
-                            return_cache_object=True,
-                            stop_at_layer=max(layers) + 1
-                        )
-                        
-                        # Store activations for each layer - move to CPU immediately
-                        for layer in layers:
-                            hook_point = f"blocks.{layer}.hook_resid_pre"
-                            layer_activations = cache[hook_point].cpu()
-                            chunk_activations[layer].append(layer_activations)
-                        
-                        # Clear cache reference and force cleanup
-                        del cache
-                        if torch.cuda.is_available():
-                            torch.cuda.empty_cache()
-                        gc.collect()
-                        
-                        # Store tokens for this chunk
-                        token_texts = tokenizer.convert_ids_to_tokens(chunk_input_ids[0])
-                        chunk_tokens.extend(token_texts)
-                        
-                    except RuntimeError as e:
-                        if "out of memory" in str(e):
-                            print(f"\nOOM with chunk {chunk_idx}")
-                            raise
+                    # Store tokens
+                    for j, text in enumerate(batch_texts):
+                        text_tokens = tokens["input_ids"][j]
+                        if tokenizer.pad_token_id is not None:
+                            pad_positions = torch.where(text_tokens == tokenizer.pad_token_id)[0]
+                            if len(pad_positions) > 0:
+                                first_pad_pos = pad_positions[0].item()
+                                actual_tokens = text_tokens[:first_pad_pos]
+                            else:
+                                actual_tokens = text_tokens
                         else:
-                            raise
+                            actual_tokens = text_tokens
+                        
+                        token_texts = tokenizer.convert_ids_to_tokens(actual_tokens)
+                        all_tokens.append(token_texts)
+                        
+                        if len(all_tokens) <= 3 or len(all_tokens) % 50 == 0:
+                            print(f"Text {len(all_tokens)}: {len(token_texts)} tokens")
+                            print(f"  First 5: {token_texts[:5]}")
+                            print(f"  Last 5: {token_texts[-5:]}")
                     
-                    # Clear chunk data
-                    del chunk_input_ids
-                    if torch.cuda.is_available():
-                        torch.cuda.empty_cache()
-                    gc.collect()
+                except RuntimeError as e:
+                    if "out of memory" in str(e):
+                        print(f"\nOOM with batch size {actual_batch_size}")
+                        raise  # If batch_size=1 fails, we can't reduce further
+                    else:
+                        raise
                 
-                # Combine chunk activations for this text
-                for layer in layers:
-                    # Concatenate along sequence length dimension
-                    combined_activations = torch.cat(chunk_activations[layer], dim=1)
-                    all_activations[layer].append(combined_activations)
-                
-                # Store combined tokens
-                all_tokens.append(chunk_tokens)
-                
-                if len(all_tokens) <= 3 or len(all_tokens) % 50 == 0:
-                    print(f"Text {len(all_tokens)}: {len(chunk_tokens)} tokens")
-                    print(f"  First 5: {chunk_tokens[:5]}")
-                    print(f"  Last 5: {chunk_tokens[-5:]}")
-                    print(f"  Total tokens: {len(chunk_tokens)}")
+                # Clear batch data
+                del tokens
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                gc.collect()
         
-        # Process final activations
+        # Process final activations in smaller chunks
         max_seq_len = max(batch.shape[1] for layer in layers for batch in all_activations[layer])
-        print(f"Maximum sequence length across all texts: {max_seq_len}")
+        print(f"Maximum sequence length across all batches: {max_seq_len}")
         
         final_activations = {}
         for layer in layers:
             print(f"\nProcessing layer {layer} final activations...")
             
             # Initialize empty tensor on CPU to store all activations
-            total_samples = len(texts)
+            total_samples = sum(batch.shape[0] for batch in all_activations[layer])
             hidden_size = all_activations[layer][0].shape[2]
             final_tensor = torch.zeros(
                 (total_samples, max_seq_len, hidden_size),
@@ -227,10 +165,28 @@ class OptimizedBatchProbeEvaluator:
                 device='cpu'
             )
             
-            # Fill tensor text by text
-            for i, text_activations in enumerate(all_activations[layer]):
-                seq_len = text_activations.shape[1]
-                final_tensor[i, :seq_len] = text_activations.squeeze(0)
+            # Fill tensor batch by batch
+            current_idx = 0
+            for batch in tqdm(all_activations[layer], desc=f"Processing layer {layer} batches"):
+                batch_size, seq_len, _ = batch.shape
+                
+                # Handle padding on CPU
+                if seq_len < max_seq_len:
+                    padding = torch.zeros(
+                        batch_size, max_seq_len - seq_len, hidden_size,
+                        dtype=batch.dtype, device='cpu'
+                    )
+                    padded_batch = torch.cat([batch, padding], dim=1)
+                else:
+                    padded_batch = batch
+                
+                # Copy to final tensor
+                final_tensor[current_idx:current_idx + batch_size] = padded_batch
+                current_idx += batch_size
+                
+                # Clear intermediate tensors
+                del padded_batch
+                gc.collect()
             
             final_activations[layer] = final_tensor
             
