@@ -104,6 +104,9 @@ class OptimizedBatchProbeEvaluator:
         lines = cleaned_text.strip().split('\n')
         print(f"DEBUG: Split into {len(lines)} lines")
         
+        # Skip system message since chat template will add its own
+        skip_system = True
+        
         for i, line in enumerate(lines):
             line = line.strip()
             if not line:
@@ -117,8 +120,16 @@ class OptimizedBatchProbeEvaluator:
                 role_part = line.split(':', 1)[0].strip()
                 if role_part in ['system', 'user', 'assistant']:
                     print(f"DEBUG: Found role line: {role_part}")
-                    # Save previous message if exists
-                    if current_role is not None and current_content:
+                    
+                    # Skip system message to avoid duplication with chat template
+                    if role_part == 'system' and skip_system:
+                        print("DEBUG: Skipping system message to avoid duplication")
+                        current_role = 'system'  # Set role to skip content
+                        current_content = []
+                        continue
+                    
+                    # Save previous message if exists (and not skipped system)
+                    if current_role is not None and current_content and current_role != 'system':
                         content = '\n'.join(current_content).strip()
                         messages.append({
                             "role": current_role,
@@ -128,16 +139,19 @@ class OptimizedBatchProbeEvaluator:
                     
                     # Start new message
                     current_role = role_part
-                    content_part = line.split(':', 1)[1].strip()
-                    current_content = [content_part] if content_part else []
+                    if role_part != 'system' or not skip_system:
+                        content_part = line.split(':', 1)[1].strip()
+                        current_content = [content_part] if content_part else []
+                    else:
+                        current_content = []
                     continue
             
-            # Add to current message content
-            if current_role is not None:
+            # Add to current message content (skip if system message)
+            if current_role is not None and current_role != 'system':
                 current_content.append(line)
         
-        # Add final message
-        if current_role is not None and current_content:
+        # Add final message (if not skipped system)
+        if current_role is not None and current_content and current_role != 'system':
             content = '\n'.join(current_content).strip()
             messages.append({
                 "role": current_role,
@@ -148,8 +162,6 @@ class OptimizedBatchProbeEvaluator:
         print(f"DEBUG: Parsed {len(messages)} messages:")
         for i, msg in enumerate(messages):
             print(f"  Message {i}: role={msg['role']}, content_len={len(msg['content'])}")
-            if msg['role'] == 'system':
-                print(f"    System content preview: {repr(msg['content'][:100])}")
         
         return messages
         
