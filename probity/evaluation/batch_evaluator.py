@@ -38,43 +38,29 @@ class OptimizedBatchProbeEvaluator:
         
         # Check if this is Llama 3.3 70B and configure RoPE scaling
         if "Llama-3.3-70B" in model_name:
-            print("Configuring Llama 3.3 with extended context window using RoPE scaling...")
+            print("Detected Llama 3.3 70B model")
+            print("Note: This model has a large context window but we'll use chunking for safety")
             
-            # Load the HuggingFace config first
-            from transformers import AutoConfig
-            config = AutoConfig.from_pretrained(model_name)
-            
-            # Configure RoPE scaling for extended context
-            print(f"Original max_position_embeddings: {config.max_position_embeddings}")
-            
-            config.rope_scaling = {
-                "type": "dynamic",
-                "factor": 8.0  # This extends context window significantly
-            }
-            print(f"RoPE scaling factor: {config.rope_scaling['factor']}")
-            print(f"Effective context window: ~{int(config.max_position_embeddings * config.rope_scaling['factor'])}")
-            
-            # Load model normally and then update its config
+            # Load model normally - we'll handle long sequences through chunking
             self.model = HookedTransformer.from_pretrained_no_processing(
                 model_name,
                 device=device,
-                dtype=self.model_dtype,
+                dtype=self.model_dtype
             )
             
-            # Update the model's config with RoPE scaling
-            self.model.cfg.use_NTK_by_parts_rope = True
-            self.model.cfg.NTK_by_parts_factor = 8.0
-            self.model.cfg.NTK_by_parts_low_freq_factor = 1.0
-            self.model.cfg.NTK_by_parts_high_freq_factor = 4.0
-            self.model.cfg.NTK_original_ctx_len = 8192
+            # Set a conservative max sequence length for chunking
+            self.max_seq_length = 2048  # Conservative limit to avoid position embedding errors
             
         else:
-            # Load normally for other models
+            # Load model normally for other models
             self.model = HookedTransformer.from_pretrained_no_processing(
                 model_name,
                 device=device,
-                dtype=self.model_dtype,
+                dtype=self.model_dtype
             )
+            
+            # Set max sequence length based on model config
+            self.max_seq_length = getattr(self.model.cfg, 'n_ctx', 2048)
         
         self.model.eval()
         
@@ -120,14 +106,25 @@ class OptimizedBatchProbeEvaluator:
                 
                 batch_texts = texts[i:i + actual_batch_size]
                 
-                # Tokenize batch
+                # Tokenize batch with conservative max length
                 tokens = tokenizer(
                     batch_texts, 
                     return_tensors="pt", 
                     padding=True,
                     truncation=True,
+                    max_length=self.max_seq_length,  # Use our conservative max length
                     add_special_tokens=False
                 ).to(self.device)
+                
+                # Check actual sequence lengths
+                actual_lengths = []
+                for j, text in enumerate(batch_texts):
+                    actual_len = tokens["input_ids"][j].ne(tokenizer.pad_token_id if tokenizer.pad_token_id is not None else 0).sum().item()
+                    actual_lengths.append(actual_len)
+                    if actual_len >= self.max_seq_length * 0.95:  # Close to limit
+                        print(f"Warning: Text {j} was truncated to {actual_len} tokens (max: {self.max_seq_length})")
+                        print(f"  Original text length: {len(text)} characters")
+                        print(f"  Text preview: {text[:200]}...")
                 
                 try:
                     # Run model with caching
@@ -465,3 +462,115 @@ class OptimizedBatchProbeEvaluator:
         
         normalized = (scores_array - min_score) / (max_score - min_score)
         return normalized.tolist()
+
+    def evaluate_conversations(self, conversations: List[str], position_indices: List[int]) -> List[Dict[str, Any]]:
+        """
+        Evaluate a batch of conversations and return probe predictions.
+        
+        Args:
+            conversations: List of conversation strings
+            position_indices: List of position indices for each conversation
+            
+        Returns:
+            List of dictionaries containing probe predictions and metadata
+        """
+        results = []
+        
+        for i, (conversation, position_idx) in enumerate(zip(conversations, position_indices)):
+            try:
+                # Tokenize the conversation
+                tokens = self.tokenizer.encode(conversation, return_tensors="pt").to(self.device)
+                
+                # Check if sequence exceeds max length
+                if tokens.shape[1] > self.max_seq_length:
+                    print(f"Warning: Sequence length {tokens.shape[1]} exceeds max length {self.max_seq_length}")
+                    print("Using chunking strategy to process long sequence...")
+                    
+                    # Use chunking strategy for long sequences
+                    result = self._evaluate_long_sequence(conversation, position_idx, tokens)
+                else:
+                    # Process normally for shorter sequences
+                    result = self._evaluate_normal_sequence(conversation, position_idx, tokens)
+                
+                results.append(result)
+                
+                # Memory cleanup
+                del tokens
+                torch.cuda.empty_cache()
+                gc.collect()
+                
+            except Exception as e:
+                print(f"Error processing conversation {i}: {str(e)}")
+                # Return a default result for failed conversations
+                results.append({
+                    'conversation_id': i,
+                    'probe_prediction': 0.5,  # Neutral prediction
+                    'error': str(e),
+                    'sequence_length': len(conversation.split()) if conversation else 0
+                })
+                
+        return results
+    
+    def _evaluate_normal_sequence(self, conversation: str, position_idx: int, tokens: torch.Tensor) -> Dict[str, Any]:
+        """Evaluate a sequence that fits within the model's context window."""
+        # Get model activations
+        with torch.no_grad():
+            logits, cache = self.model.run_with_cache(tokens, names_filter=self.hook_name)
+        
+        # Extract activations at the specified position
+        activations = cache[self.hook_name][0, position_idx, :]  # [d_model]
+        
+        # Apply probe
+        probe_prediction = self.probe(activations.unsqueeze(0)).item()
+        
+        return {
+            'conversation_id': hash(conversation) % 1000000,  # Simple ID
+            'probe_prediction': probe_prediction,
+            'sequence_length': tokens.shape[1],
+            'position_index': position_idx,
+            'processing_method': 'normal'
+        }
+    
+    def _evaluate_long_sequence(self, conversation: str, position_idx: int, tokens: torch.Tensor) -> Dict[str, Any]:
+        """Evaluate a long sequence using chunking strategy."""
+        # Strategy: Take the last chunk that contains the position we're interested in
+        seq_length = tokens.shape[1]
+        
+        # Calculate chunk boundaries
+        if position_idx < self.max_seq_length:
+            # Position is in the first chunk
+            chunk_start = 0
+            chunk_end = min(self.max_seq_length, seq_length)
+            chunk_position_idx = position_idx
+        else:
+            # Position is beyond first chunk - take the last chunk that includes it
+            chunk_end = min(position_idx + self.max_seq_length // 2, seq_length)
+            chunk_start = max(0, chunk_end - self.max_seq_length)
+            chunk_position_idx = position_idx - chunk_start
+        
+        # Extract the chunk
+        chunk_tokens = tokens[:, chunk_start:chunk_end]
+        
+        print(f"Processing chunk: positions {chunk_start}-{chunk_end}, target position {chunk_position_idx}")
+        
+        # Process the chunk
+        with torch.no_grad():
+            logits, cache = self.model.run_with_cache(chunk_tokens, names_filter=self.hook_name)
+        
+        # Extract activations at the specified position within the chunk
+        activations = cache[self.hook_name][0, chunk_position_idx, :]  # [d_model]
+        
+        # Apply probe
+        probe_prediction = self.probe(activations.unsqueeze(0)).item()
+        
+        return {
+            'conversation_id': hash(conversation) % 1000000,  # Simple ID
+            'probe_prediction': probe_prediction,
+            'sequence_length': seq_length,
+            'chunk_start': chunk_start,
+            'chunk_end': chunk_end,
+            'chunk_length': chunk_end - chunk_start,
+            'position_index': position_idx,
+            'chunk_position_index': chunk_position_idx,
+            'processing_method': 'chunked'
+        }
