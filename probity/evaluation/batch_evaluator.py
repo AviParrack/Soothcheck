@@ -407,15 +407,24 @@ class OptimizedBatchProbeEvaluator:
         mean_scores = np.array(all_mean_scores)
         predictions = [1 if score > 0.5 else 0 for score in mean_scores]
         
-        # Get precision, recall, f1 for binary classification
-        precision, recall, f1, _ = precision_recall_fscore_support(labels, predictions, average='binary')
+        # Get precision, recall, f1 for binary classification with zero_division handling
+        precision, recall, f1, _ = precision_recall_fscore_support(
+            labels, predictions, average='binary', zero_division=0.0
+        )
+        
+        # Handle ROC AUC for single-class scenarios
+        try:
+            auroc = float(roc_auc_score(labels, mean_scores))
+        except ValueError:
+            # Single class case - ROC AUC is undefined
+            auroc = 0.5  # Neutral value for single class
         
         metrics = {
             'accuracy': float(accuracy_score(labels, predictions)),
             'precision': float(precision),
             'recall': float(recall),
             'f1': float(f1),
-            'auroc': float(roc_auc_score(labels, mean_scores))
+            'auroc': auroc
         }
         
         # Prepare token_details for visualization
@@ -447,7 +456,7 @@ class OptimizedBatchProbeEvaluator:
             'all_samples': final_samples,
             'token_details': token_details,
             'mean_scores': mean_scores.tolist(),
-            'predictions': predictions.tolist()
+            'predictions': predictions
         }
     
     def _normalize_to_01(self, scores: List[float]) -> List[float]:
