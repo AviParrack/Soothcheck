@@ -204,18 +204,8 @@ Code Solution: """
                 result += msg['content']
                 break
         
-        result += "<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n"
-        
-        # Add final assistant response
-        assistant_count = 0
-        for msg in messages:
-            if msg['role'] == 'assistant':
-                assistant_count += 1
-                if assistant_count == 2:  # Second assistant message
-                    result += msg['content']
-                    break
-        
-        result += "<|eot_id|>"
+        # Original format ends here - no final assistant response section
+        # The conversation ends with the user message
         
         print(f"DEBUG: Reconstructed format length: {len(result)}")
         return result
