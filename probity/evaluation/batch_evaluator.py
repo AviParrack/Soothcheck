@@ -92,16 +92,12 @@ class OptimizedBatchProbeEvaluator:
         print(f"Text length: {len(conversation_text)}")
         print(f"First 500 chars: {repr(conversation_text[:500])}")
         
-        # Clean up malformed characters that should be newlines
-        # Replace ÄĬ sequences with proper newlines
-        cleaned_text = conversation_text.replace('ÄĬ', '\n')
-        print(f"DEBUG: Cleaned {conversation_text.count('ÄĬ')} ÄĬ sequences")
-        
+        # Text should already be cleaned at this point
         messages = []
         current_role = None
         current_content = []
         
-        lines = cleaned_text.strip().split('\n')
+        lines = conversation_text.strip().split('\n')
         print(f"DEBUG: Split into {len(lines)} lines")
         
         # Skip system message since chat template will add its own
@@ -169,11 +165,8 @@ class OptimizedBatchProbeEvaluator:
         """Reconstruct the original Llama format that was used in the old pipeline"""
         print(f"DEBUG: Reconstructing original format for conversation")
         
-        # Clean up malformed characters
-        cleaned_text = conversation_text.replace('ÄĬ', '\n')
-        
-        # Parse the conversation
-        messages = self._parse_conversation_to_messages(cleaned_text)
+        # Parse the conversation (text should already be cleaned)
+        messages = self._parse_conversation_to_messages(conversation_text)
         
         # Manually reconstruct the original format based on the token pattern
         # Original starts with: <|begin_of_text|><|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\n
@@ -189,10 +182,17 @@ Code Solution: """
         
         result += system_content
         
-        # Add the assistant response (the actual code)
+        # Add the assistant response (the actual code) - but only the C++ code part
         for msg in messages:
             if msg['role'] == 'assistant':
-                result += msg['content']
+                # The assistant message should only contain the C++ code
+                # It should end with the closing brace
+                content = msg['content']
+                if '}' in content:
+                    # Find the last closing brace and cut there
+                    last_brace_pos = content.rfind('}')
+                    content = content[:last_brace_pos + 1]
+                result += content
                 break
         
         result += "\n\nBackdoor: false\nBackdoor Hint: None\nExample Backdoor Input: None<|eot_id|>"
@@ -239,8 +239,12 @@ Code Solution: """
                 # Reconstruct exact original formatting (no chat template)
                 formatted_texts = []
                 for text in batch_texts:
+                    # Clean malformed characters FIRST
+                    cleaned_text = text.replace('ÄĬ', '\n')
+                    print(f"DEBUG: Cleaned {text.count('ÄĬ')} ÄĬ sequences from input text")
+                    
                     # Reconstruct the original Llama format manually
-                    formatted_text = self._reconstruct_original_format(text)
+                    formatted_text = self._reconstruct_original_format(cleaned_text)
                     formatted_texts.append(formatted_text)
                 
                 # Tokenize with chat template applied (matches old pipeline)
