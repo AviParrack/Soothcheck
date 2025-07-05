@@ -107,23 +107,29 @@ class OptimizedBatchProbeEvaluator:
             print(f"DEBUG: Line {i}: {repr(line)}")
                 
             # Check if this is a role line (system:, user:, assistant:)
-            if line.endswith(':') and line[:-1] in ['system', 'user', 'assistant']:
-                print(f"DEBUG: Found role line: {line}")
-                # Save previous message if exists
-                if current_role is not None and current_content:
-                    messages.append({
-                        "role": current_role,
-                        "content": '\n'.join(current_content).strip()
-                    })
-                
-                # Start new message
-                current_role = line[:-1]
-                current_content = []
-            else:
-                # Add to current message content
-                if current_role is not None:
-                    current_content.append(line)
-                    print(f"DEBUG: Added to {current_role}: {repr(line)}")
+            if ':' in line:
+                role_part = line.split(':', 1)[0].strip()
+                if role_part in ['system', 'user', 'assistant']:
+                    print(f"DEBUG: Found role line: {line}")
+                    # Save previous message if exists
+                    if current_role is not None and current_content:
+                        messages.append({
+                            "role": current_role,
+                            "content": '\n'.join(current_content).strip()
+                        })
+                    
+                    # Start new message
+                    current_role = role_part
+                    content_part = line.split(':', 1)[1].strip()
+                    current_content = [content_part] if content_part else []
+                    if content_part:
+                        print(f"DEBUG: Started {current_role} with content: {repr(content_part)}")
+                    continue
+            
+            # Add to current message content
+            if current_role is not None:
+                current_content.append(line)
+                print(f"DEBUG: Added to {current_role}: {repr(line)}")
         
         # Add final message
         if current_role is not None and current_content:
