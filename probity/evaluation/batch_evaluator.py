@@ -90,8 +90,12 @@ class OptimizedBatchProbeEvaluator:
         """Parse conversation format into messages for chat template"""
         print(f"DEBUG: Parsing conversation text:")
         print(f"Text length: {len(conversation_text)}")
-        print(f"First 200 chars: {repr(conversation_text[:200])}")
+        print(f"First 500 chars: {repr(conversation_text[:500])}")
         
+        # Check if this looks like it already has system message embedded
+        if conversation_text.startswith("system:"):
+            print("DEBUG: Conversation starts with system: - this might be the issue")
+            
         messages = []
         current_role = None
         current_content = []
@@ -99,17 +103,30 @@ class OptimizedBatchProbeEvaluator:
         lines = conversation_text.strip().split('\n')
         print(f"DEBUG: Split into {len(lines)} lines")
         
-        for i, line in enumerate(lines):
+        # Skip system message if it appears to be a duplicate
+        start_idx = 0
+        if lines and lines[0].startswith("system:"):
+            print("DEBUG: Skipping system message line - likely duplicate")
+            # Find where system message ends (next role line)
+            for i in range(1, len(lines)):
+                line = lines[i].strip()
+                if ':' in line:
+                    role_part = line.split(':', 1)[0].strip()
+                    if role_part in ['user', 'assistant']:
+                        start_idx = i
+                        break
+        
+        for i, line in enumerate(lines[start_idx:], start_idx):
             line = line.strip()
             if not line:
                 continue
             
             print(f"DEBUG: Line {i}: {repr(line)}")
                 
-            # Check if this is a role line (system:, user:, assistant:)
+            # Check if this is a role line (user:, assistant: only - skip system)
             if ':' in line:
                 role_part = line.split(':', 1)[0].strip()
-                if role_part in ['system', 'user', 'assistant']:
+                if role_part in ['user', 'assistant']:  # Only parse user/assistant, skip system
                     print(f"DEBUG: Found role line: {line}")
                     # Save previous message if exists
                     if current_role is not None and current_content:
