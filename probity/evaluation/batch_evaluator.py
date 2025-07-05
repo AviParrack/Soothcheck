@@ -86,6 +86,43 @@ class OptimizedBatchProbeEvaluator:
         # Cache for activations
         self._activation_cache = {}
         
+    def _parse_conversation_to_messages(self, conversation_text: str) -> List[Dict[str, str]]:
+        """Parse conversation format into messages for chat template"""
+        messages = []
+        current_role = None
+        current_content = []
+        
+        for line in conversation_text.strip().split('\n'):
+            line = line.strip()
+            if not line:
+                continue
+                
+            # Check if this is a role line (system:, user:, assistant:)
+            if line.endswith(':') and line[:-1] in ['system', 'user', 'assistant']:
+                # Save previous message if exists
+                if current_role is not None and current_content:
+                    messages.append({
+                        "role": current_role,
+                        "content": '\n'.join(current_content).strip()
+                    })
+                
+                # Start new message
+                current_role = line[:-1]
+                current_content = []
+            else:
+                # Add to current message content
+                if current_role is not None:
+                    current_content.append(line)
+        
+        # Add final message
+        if current_role is not None and current_content:
+            messages.append({
+                "role": current_role,
+                "content": '\n'.join(current_content).strip()
+            })
+        
+        return messages
+        
     def get_batch_activations(self, texts: List[str], layers: List[int], 
                             batch_size: int = 1) -> Dict[int, torch.Tensor]:
         """Get activations for all texts and layers efficiently using HuggingFace model"""
