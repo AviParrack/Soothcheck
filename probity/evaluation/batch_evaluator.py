@@ -52,62 +52,49 @@ class OptimizedBatchProbeEvaluator:
         
         # First tokenize the entire text without truncation to get full token count
         tokens = tokenizer(text, add_special_tokens=False, truncation=False)
+        token_ids = tokens['input_ids']
         
-        if len(tokens['input_ids']) <= max_length:
-            return [(0, len(tokens['input_ids']))]
+        # If text fits in one chunk, return it whole
+        if len(token_ids) <= max_length:
+            return [(0, len(token_ids))]
         
-        # Decode full text for sentence boundary detection
-        full_text = text
-        
-        # Find sentence boundaries (periods followed by space/newline)
-        sentence_ends = []
-        for i, char in enumerate(full_text):
-            if char == '.' and (i == len(full_text) - 1 or full_text[i + 1] in [' ', '\n', '\t']):
-                sentence_ends.append(i + 1)
-        
-        # If no sentence boundaries found, fall back to newlines
-        if not sentence_ends:
-            sentence_ends = [i + 1 for i, char in enumerate(full_text) if char == '\n']
-        
-        # If still no boundaries, fall back to rough chunking at max_length
-        if not sentence_ends:
-            return [(i, min(i + max_length, len(tokens['input_ids']))) 
-                   for i in range(0, len(tokens['input_ids']), max_length)]
-        
-        # Convert character positions to token positions
+        # Initialize boundaries
         chunk_boundaries = []
-        current_chunk_start = 0
-        current_length = 0
+        current_start = 0
         
-        # Get token offsets for mapping
-        token_offsets = tokenizer(text, return_offsets_mapping=True, add_special_tokens=False)['offset_mapping']
-        
-        for sent_end in sentence_ends:
-            # Find the token that contains this sentence end
-            end_token_idx = None
-            for idx, (start, end) in enumerate(token_offsets):
-                if start <= sent_end <= end:
-                    end_token_idx = idx + 1  # Include the full token
-                    break
+        while current_start < len(token_ids):
+            # If remaining tokens fit in max_length, make them the last chunk
+            if len(token_ids) - current_start <= max_length:
+                chunk_boundaries.append((current_start, len(token_ids)))
+                break
             
-            if end_token_idx is None:
-                continue
-                
-            # Check if adding this sentence would exceed max_length
-            chunk_length = end_token_idx - current_chunk_start
+            # Look for a good splitting point within max_length
+            # Start from max possible position and work backwards
+            split_pos = min(current_start + max_length, len(token_ids))
+            best_split = split_pos
             
-            if current_length + chunk_length > max_length:
-                # Current chunk is full, start a new one
-                if current_length > 0:
-                    chunk_boundaries.append((current_chunk_start, current_chunk_start + current_length))
-                current_chunk_start = current_chunk_start + current_length
-                current_length = chunk_length
-            else:
-                current_length += chunk_length
-        
-        # Add the final chunk
-        if current_length > 0:
-            chunk_boundaries.append((current_chunk_start, current_chunk_start + current_length))
+            # Decode a window of tokens around the potential split point
+            window_start = max(0, split_pos - 100)  # Look back up to 100 tokens
+            window_end = min(len(token_ids), split_pos + 100)  # Look ahead up to 100 tokens
+            window_tokens = token_ids[window_start:window_end]
+            window_text = tokenizer.decode(window_tokens)
+            
+            # Find sentence boundaries in the window
+            sentence_ends = []
+            for i, char in enumerate(window_text):
+                if char == '.' and (i == len(window_text) - 1 or window_text[i + 1] in [' ', '\n', '\t']):
+                    # Convert window position to token position
+                    token_pos = window_start + len(tokenizer.encode(window_text[:i+1], add_special_tokens=False))
+                    if token_pos <= split_pos:  # Only consider boundaries before split_pos
+                        sentence_ends.append(token_pos)
+            
+            # If we found sentence boundaries, use the last one before split_pos
+            if sentence_ends:
+                best_split = max(x for x in sentence_ends if x <= split_pos)
+            
+            # Add the chunk and continue
+            chunk_boundaries.append((current_start, best_split))
+            current_start = best_split
         
         return chunk_boundaries
         
@@ -149,8 +136,17 @@ class OptimizedBatchProbeEvaluator:
                 chunk_tokens = []
                 chunk_activations = {layer: [] for layer in layers}
                 
+                # First tokenize the entire text to get full token sequence
+                full_tokens = tokenizer(
+                    text,
+                    return_tensors="pt",
+                    padding=False,
+                    truncation=False,
+                    add_special_tokens=False
+                )
+                
                 for chunk_idx, (start_idx, end_idx) in enumerate(chunk_boundaries):
-                    print(f"Processing chunk {chunk_idx + 1}/{len(chunk_boundaries)}")
+                    print(f"Processing chunk {chunk_idx + 1}/{len(chunk_boundaries)} (tokens {start_idx}-{end_idx})")
                     
                     # Aggressive memory cleanup before each chunk
                     if torch.cuda.is_available():
@@ -158,21 +154,13 @@ class OptimizedBatchProbeEvaluator:
                     import gc
                     gc.collect()
                     
-                    # Tokenize just this chunk
-                    chunk_text = text[start_idx:end_idx]
-                    tokens = tokenizer(
-                        [chunk_text],
-                        return_tensors="pt",
-                        padding=True,
-                        truncation=True,
-                        max_length=2048,  # Match rotary embeddings limit
-                        add_special_tokens=False
-                    ).to(self.device)
+                    # Extract this chunk's tokens
+                    chunk_input_ids = full_tokens["input_ids"][0][start_idx:end_idx].unsqueeze(0)
                     
                     try:
                         # Run model with caching
                         _, cache = self.model.run_with_cache(
-                            tokens["input_ids"],
+                            chunk_input_ids.to(self.device),
                             names_filter=hook_points,
                             return_cache_object=True,
                             stop_at_layer=max(layers) + 1
@@ -190,19 +178,8 @@ class OptimizedBatchProbeEvaluator:
                             torch.cuda.empty_cache()
                         gc.collect()
                         
-                        # Store tokens
-                        text_tokens = tokens["input_ids"][0]
-                        if tokenizer.pad_token_id is not None:
-                            pad_positions = torch.where(text_tokens == tokenizer.pad_token_id)[0]
-                            if len(pad_positions) > 0:
-                                first_pad_pos = pad_positions[0].item()
-                                actual_tokens = text_tokens[:first_pad_pos]
-                            else:
-                                actual_tokens = text_tokens
-                        else:
-                            actual_tokens = text_tokens
-                        
-                        token_texts = tokenizer.convert_ids_to_tokens(actual_tokens)
+                        # Store tokens for this chunk
+                        token_texts = tokenizer.convert_ids_to_tokens(chunk_input_ids[0])
                         chunk_tokens.extend(token_texts)
                         
                     except RuntimeError as e:
@@ -213,7 +190,7 @@ class OptimizedBatchProbeEvaluator:
                             raise
                     
                     # Clear chunk data
-                    del tokens
+                    del chunk_input_ids
                     if torch.cuda.is_available():
                         torch.cuda.empty_cache()
                     gc.collect()
@@ -231,6 +208,7 @@ class OptimizedBatchProbeEvaluator:
                     print(f"Text {len(all_tokens)}: {len(chunk_tokens)} tokens")
                     print(f"  First 5: {chunk_tokens[:5]}")
                     print(f"  Last 5: {chunk_tokens[-5:]}")
+                    print(f"  Total tokens: {len(chunk_tokens)}")
         
         # Process final activations
         max_seq_len = max(batch.shape[1] for layer in layers for batch in all_activations[layer])
