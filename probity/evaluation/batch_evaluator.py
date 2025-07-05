@@ -36,32 +36,38 @@ class OptimizedBatchProbeEvaluator:
         self.model_dtype = get_model_dtype(model_name)
         print(f"Using model dtype: {self.model_dtype}")
         
-        # For Llama 3.3 models, we need to configure RoPE scaling properly
-        if "Llama-3.3" in model_name:
+        # Check if this is Llama 3.3 70B and configure RoPE scaling
+        if "Llama-3.3-70B" in model_name:
             print("Configuring Llama 3.3 with extended context window using RoPE scaling...")
-            from transformers import AutoConfig
             
-            # Load config and modify for extended context
+            # Load the HuggingFace config first
+            from transformers import AutoConfig
             config = AutoConfig.from_pretrained(model_name)
             
             # Configure RoPE scaling for extended context
-            # Use dynamic scaling which is effective for Llama models
-            config.rope_scaling = {
-                'type': 'dynamic',
-                'factor': 8.0  # This extends context from ~16k to ~128k
-            }
-            
             print(f"Original max_position_embeddings: {config.max_position_embeddings}")
+            
+            config.rope_scaling = {
+                "type": "dynamic",
+                "factor": 8.0  # This extends context window significantly
+            }
             print(f"RoPE scaling factor: {config.rope_scaling['factor']}")
             print(f"Effective context window: ~{int(config.max_position_embeddings * config.rope_scaling['factor'])}")
             
-            # Load model directly with HookedTransformer but pass the modified config
+            # Load model normally and then update its config
             self.model = HookedTransformer.from_pretrained_no_processing(
                 model_name,
                 device=device,
                 dtype=self.model_dtype,
-                hf_cfg=config,  # Pass the modified config
             )
+            
+            # Update the model's config with RoPE scaling
+            self.model.cfg.use_NTK_by_parts_rope = True
+            self.model.cfg.NTK_by_parts_factor = 8.0
+            self.model.cfg.NTK_by_parts_low_freq_factor = 1.0
+            self.model.cfg.NTK_by_parts_high_freq_factor = 4.0
+            self.model.cfg.NTK_original_ctx_len = 8192
+            
         else:
             # Load normally for other models
             self.model = HookedTransformer.from_pretrained_no_processing(
