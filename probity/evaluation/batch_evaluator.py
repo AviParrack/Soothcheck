@@ -47,7 +47,7 @@ class OptimizedBatchProbeEvaluator:
         self._activation_cache = {}
         
     def get_batch_activations(self, texts: List[str], layers: List[int], 
-                            batch_size: int = 8) -> Dict[int, torch.Tensor]:
+                            batch_size: int = 1) -> Dict[int, torch.Tensor]:
         """Get activations for all texts and layers efficiently"""
         
         # Create cache key
@@ -64,34 +64,23 @@ class OptimizedBatchProbeEvaluator:
             from transformers import AutoTokenizer
             tokenizer = AutoTokenizer.from_pretrained(self.model.cfg.model_name)
         
-        print(f"Tokenizer pad_token_id: {tokenizer.pad_token_id}")
-        print(f"Tokenizer eos_token_id: {tokenizer.eos_token_id}")
-        print(f"Tokenizer vocab size: {len(tokenizer)}")
-        
-        # Debug first text tokenization
-        if texts:
-            print("\n=== DEBUG: Single text tokenization ===")
-            sample_text = texts[0]
-            print(f"Sample text length: {len(sample_text)}")
-            tokens = tokenizer(sample_text, return_tensors="pt", add_special_tokens=False)
-            print(f"Token count: {tokens['input_ids'].shape[1]}")
-            print("=== END DEBUG ===\n")
-        
         # Process in smaller batches with memory cleanup
         all_activations = {layer: [] for layer in layers}
         all_tokens = []
         
-        # Reduce batch size for long sequences
-        actual_batch_size = min(batch_size, 4)  # Cap at 4 for safety
+        # Start with minimal batch size
+        actual_batch_size = 1
         num_batches = (len(texts) + actual_batch_size - 1) // actual_batch_size
         
         with torch.no_grad():
             for i in tqdm(range(0, len(texts), actual_batch_size), total=num_batches, desc="Processing batches"):
-                batch_texts = texts[i:i + actual_batch_size]
-                
-                # Clear CUDA cache
+                # Aggressive memory cleanup before each batch
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
+                import gc
+                gc.collect()
+                
+                batch_texts = texts[i:i + actual_batch_size]
                 
                 # Tokenize batch
                 tokens = tokenizer(
@@ -118,8 +107,11 @@ class OptimizedBatchProbeEvaluator:
                         layer_activations = cache[hook_point].cpu()
                         all_activations[layer].append(layer_activations)
                     
-                    # Clear cache reference
+                    # Clear cache reference and force cleanup
                     del cache
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                    gc.collect()
                     
                     # Store tokens
                     for j, text in enumerate(batch_texts):
@@ -144,79 +136,68 @@ class OptimizedBatchProbeEvaluator:
                     
                 except RuntimeError as e:
                     if "out of memory" in str(e):
-                        # If OOM occurs, try with even smaller batch
-                        print(f"\nOOM with batch size {actual_batch_size}, reducing...")
-                        if actual_batch_size > 1:
-                            actual_batch_size = max(1, actual_batch_size // 2)
-                            num_batches = (len(texts) + actual_batch_size - 1) // actual_batch_size
-                            # Clear memory and retry
-                            if torch.cuda.is_available():
-                                torch.cuda.empty_cache()
-                            continue
-                        else:
-                            raise  # If batch_size=1 still fails, we have a problem
+                        print(f"\nOOM with batch size {actual_batch_size}")
+                        raise  # If batch_size=1 fails, we can't reduce further
                     else:
                         raise
                 
-                # Force garbage collection
-                import gc
-                gc.collect()
+                # Clear batch data
+                del tokens
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
+                gc.collect()
         
-        # Since batches may have different padding lengths, we need to pad all to the same length
+        # Process final activations in smaller chunks
         max_seq_len = max(batch.shape[1] for layer in layers for batch in all_activations[layer])
         print(f"Maximum sequence length across all batches: {max_seq_len}")
         
-        # Process each layer separately to manage memory
         final_activations = {}
         for layer in layers:
             print(f"\nProcessing layer {layer} final activations...")
-            padded_batches = []
             
-            # Process each batch
-            for batch_activations in all_activations[layer]:
-                batch_size, seq_len, hidden_size = batch_activations.shape
+            # Initialize empty tensor on CPU to store all activations
+            total_samples = sum(batch.shape[0] for batch in all_activations[layer])
+            hidden_size = all_activations[layer][0].shape[2]
+            final_tensor = torch.zeros(
+                (total_samples, max_seq_len, hidden_size),
+                dtype=all_activations[layer][0].dtype,
+                device='cpu'
+            )
+            
+            # Fill tensor batch by batch
+            current_idx = 0
+            for batch in tqdm(all_activations[layer], desc=f"Processing layer {layer} batches"):
+                batch_size, seq_len, _ = batch.shape
+                
+                # Handle padding on CPU
                 if seq_len < max_seq_len:
                     padding = torch.zeros(
-                        batch_size, max_seq_len - seq_len, hidden_size, 
-                        dtype=batch_activations.dtype, device='cpu'  # Keep on CPU
+                        batch_size, max_seq_len - seq_len, hidden_size,
+                        dtype=batch.dtype, device='cpu'
                     )
-                    padded_batch = torch.cat([batch_activations, padding], dim=1)
+                    padded_batch = torch.cat([batch, padding], dim=1)
                 else:
-                    padded_batch = batch_activations
-                padded_batches.append(padded_batch)
-            
-            # Move to GPU and concatenate in chunks if needed
-            chunk_size = 2  # Process 2 batches at a time
-            final_chunks = []
-            
-            for chunk_start in range(0, len(padded_batches), chunk_size):
-                chunk_end = min(chunk_start + chunk_size, len(padded_batches))
-                chunk_batches = padded_batches[chunk_start:chunk_end]
+                    padded_batch = batch
                 
-                # Move chunk to GPU and concatenate
-                gpu_chunk = torch.cat([batch.to(self.device) for batch in chunk_batches], dim=0)
-                final_chunks.append(gpu_chunk)
+                # Copy to final tensor
+                final_tensor[current_idx:current_idx + batch_size] = padded_batch
+                current_idx += batch_size
                 
-                # Clear chunk batches
-                del chunk_batches
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
+                # Clear intermediate tensors
+                del padded_batch
+                gc.collect()
             
-            # Final concatenation of chunks
-            final_activations[layer] = torch.cat(final_chunks, dim=0)
+            final_activations[layer] = final_tensor
             
-            # Clear intermediate results
-            del padded_batches
-            del final_chunks
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
+            # Clear layer data
+            del all_activations[layer]
+            gc.collect()
         
-        # Clear more memory
+        # Clear intermediate results
         del all_activations
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
+        gc.collect()
         
         result = {
             'activations': final_activations,
@@ -281,50 +262,49 @@ class OptimizedBatchProbeEvaluator:
         
         # Move probe to device and ensure it matches model dtype
         probe = probe.to(self.device)
+        probe.eval()
         
-        # Get probe's expected dtype - check parameters first, then buffers
-        probe_dtype = self.model_dtype  # Default to model dtype
-        try:
-            probe_dtype = next(probe.parameters()).dtype
-        except StopIteration:
-            # No parameters, check buffers
-            try:
-                probe_dtype = next(probe.buffers()).dtype
-            except StopIteration:
-                # No buffers either, use model dtype
-                probe_dtype = self.model_dtype
+        # Get probe's expected dtype
+        probe_dtype = next(probe.parameters()).dtype if any(True for _ in probe.parameters()) else self.model_dtype
         
         print(f"Probe dtype: {probe_dtype}, Activations dtype: {layer_activations.dtype}")
         
-        probe.eval()
-        
-        # Get token-level scores for all texts at once
+        # Process in small chunks to manage memory
+        chunk_size = 1  # Process one sample at a time
         all_token_scores = []
         all_samples = []
         
         with torch.no_grad():
-            # Process each text individually to handle variable lengths properly
             for i, (text, true_label) in tqdm(enumerate(zip(texts, labels)), total=len(texts), desc="Processing texts"):
+                # Clear memory before each sample
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                import gc
+                gc.collect()
+                
                 # Get tokens and actual length for this text
                 tokens = tokens_by_text[i]
                 actual_length = len(tokens)
                 
                 # Get activations for this text (up to actual length)
-                text_activations = layer_activations[i, :actual_length, :].to(self.device)
+                text_activations = layer_activations[i, :actual_length].to(self.device)
                 
-                # ENSURE DTYPE COMPATIBILITY
+                # Ensure dtype compatibility
                 if text_activations.dtype != probe_dtype:
                     text_activations = text_activations.to(dtype=probe_dtype)
                 
                 # Apply probe to all tokens for this text
                 token_scores = probe(text_activations)
                 
+                # Move results to CPU immediately
+                token_scores = token_scores.cpu()
+                
                 # Apply sigmoid only to LogisticProbe
                 if probe.__class__.__name__ == 'LogisticProbe':
                     token_scores = torch.sigmoid(token_scores)
                 
                 # Convert to list
-                token_scores_list = token_scores.cpu().squeeze().tolist()
+                token_scores_list = token_scores.squeeze().tolist()
                 
                 # Handle single token case
                 if isinstance(token_scores_list, float):
@@ -333,7 +313,6 @@ class OptimizedBatchProbeEvaluator:
                 # Ensure we have the right number of scores
                 if len(token_scores_list) != actual_length:
                     print(f"Warning: Score length mismatch for text {i}: {len(token_scores_list)} vs {actual_length}")
-                    # Pad or truncate as needed
                     if len(token_scores_list) < actual_length:
                         token_scores_list.extend([0.0] * (actual_length - len(token_scores_list)))
                     else:
@@ -349,6 +328,13 @@ class OptimizedBatchProbeEvaluator:
                     "raw_token_scores": token_scores_list
                 }
                 all_samples.append(sample_info)
+                
+                # Clear sample data
+                del text_activations
+                del token_scores
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                gc.collect()
         
         # Global normalization for non-logistic probes
         if probe.__class__.__name__ == 'LogisticProbe':
@@ -371,7 +357,7 @@ class OptimizedBatchProbeEvaluator:
         all_mean_scores = []
         
         for sample in all_samples:
-            mean_score = np.mean(sample["token_scores"])
+            mean_score = float(np.mean(sample["token_scores"]))
             all_mean_scores.append(mean_score)
             
             sample_info = {
@@ -380,7 +366,7 @@ class OptimizedBatchProbeEvaluator:
                 "true_label": int(sample["true_label"]),
                 "tokens": sample["tokens"],
                 "token_scores": sample["token_scores"],
-                "mean_score": float(mean_score),
+                "mean_score": mean_score,
                 "predicted_label": int(1 if mean_score > 0.5 else 0),
                 "is_correct": bool((mean_score > 0.5) == (sample["true_label"] == 1)),
             }
