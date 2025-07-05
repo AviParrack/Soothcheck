@@ -420,10 +420,10 @@ def main():
             # Store scores directly as a list like pairs_probe and rp_probe
             item['conversations'][branch_name]['probe_scores'][probe_name] = score_list['token_scores']
             
-            # Store tokens separately for debugging (temporary)
-            if 'debug' not in item['conversations'][branch_name]:
-                item['conversations'][branch_name]['debug'] = {}
-            item['conversations'][branch_name]['debug']['tokens'] = score_list['tokens']
+            # Store token list in a separate field for later alignment
+            if 'token_lists' not in item['conversations'][branch_name]:
+                item['conversations'][branch_name]['token_lists'] = {}
+            item['conversations'][branch_name]['token_lists'][probe_name] = score_list['tokens']
             
             # Validate the stored data
             print(f"\nValidating stored data for sample {item.get('id', 'unknown')}:")
@@ -431,6 +431,8 @@ def main():
             print(f"  Probe: {probe_name}")
             print(f"  Token count: {len(score_list['token_scores'])}")
             print(f"  Available probes: {item['conversations'][branch_name]['available_probes']}")
+            print(f"  First few tokens: {score_list['tokens'][:5]}")
+            print(f"  Last few tokens: {score_list['tokens'][-5:]}")
     
     # Save augmented data
     print(f"\nSaving results to {output_file}")
