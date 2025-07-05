@@ -127,6 +127,8 @@ class OptimizedBatchProbeEvaluator:
                     # Save previous message if exists (and not skipped system)
                     if current_role is not None and current_content and current_role != 'system':
                         content = '\n'.join(current_content).strip()
+                        # Clean any remaining ÄĬ characters from the content
+                        content = content.replace('ÄĬ', '\n')
                         messages.append({
                             "role": current_role,
                             "content": content
@@ -149,6 +151,8 @@ class OptimizedBatchProbeEvaluator:
         # Add final message (if not skipped system)
         if current_role is not None and current_content and current_role != 'system':
             content = '\n'.join(current_content).strip()
+            # Clean any remaining ÄĬ characters from the content
+            content = content.replace('ÄĬ', '\n')
             messages.append({
                 "role": current_role,
                 "content": content
