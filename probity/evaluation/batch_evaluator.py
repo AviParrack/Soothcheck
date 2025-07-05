@@ -186,17 +186,11 @@ Code Solution: """
         
         result += system_content
         
-        # Add the assistant response (the actual code) - but only the C++ code part
+        # Add the assistant response (the actual code) - DON'T assume it's C++ code
         for msg in messages:
             if msg['role'] == 'assistant':
-                # The assistant message should only contain the C++ code
-                # It should end with the closing brace
-                content = msg['content']
-                if '}' in content:
-                    # Find the last closing brace and cut there
-                    last_brace_pos = content.rfind('}')
-                    content = content[:last_brace_pos + 1]
-                result += content
+                # Just add the full assistant content, don't truncate
+                result += msg['content']
                 break
         
         result += "\n\nBackdoor: false\nBackdoor Hint: None\nExample Backdoor Input: None<|eot_id|>"
@@ -242,10 +236,23 @@ Code Solution: """
                 
                 # Reconstruct exact original formatting (no chat template)
                 formatted_texts = []
-                for text in batch_texts:
-                    # Clean malformed characters FIRST
-                    cleaned_text = text.replace('ÄĬ', '\n')
-                    print(f"DEBUG: Cleaned {text.count('ÄĬ')} ÄĬ sequences from input text")
+                for idx, text in enumerate(batch_texts):
+                    # Clean malformed characters FIRST - handle multiple types of encoding issues
+                    cleaned_text = text
+                    
+                    # Fix the specific ÄĬ issue - these are malformed newlines
+                    cleaned_text = cleaned_text.replace('ÄĬ', '\n')
+                    
+                    # Also handle other potential encoding issues
+                    cleaned_text = cleaned_text.replace('Ä', '\n').replace('Ĭ', '\n')
+                    
+                    # Clean up multiple consecutive newlines that might result from the above
+                    import re
+                    cleaned_text = re.sub(r'\n+', '\n', cleaned_text)
+                    
+                    print(f"DEBUG: Processing sample {idx}: Cleaned {text.count('ÄĬ')} ÄĬ sequences from input text")
+                    print(f"DEBUG: Sample {idx} first 200 chars: {repr(text[:200])}")
+                    print(f"DEBUG: Sample {idx} after cleaning: {repr(cleaned_text[:200])}")
                     
                     # Reconstruct the original Llama format manually
                     formatted_text = self._reconstruct_original_format(cleaned_text)
