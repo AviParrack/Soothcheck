@@ -36,23 +36,16 @@ class OptimizedBatchProbeEvaluator:
         self.model_dtype = get_model_dtype(model_name)
         print(f"Using model dtype: {self.model_dtype}")
         
-        # For Llama 3.3 models, we need to configure the context length properly
-        if "Llama-3.3" in model_name:
-            print("Configuring Llama 3.3 with extended context window...")
-            self.model = HookedTransformer.from_pretrained_no_processing(
-                model_name,
-                device=device,
-                dtype=self.model_dtype,
-                n_ctx=131072,  # 128k context window
-                max_position_embeddings=131072,
-            )
-        else:
-            self.model = HookedTransformer.from_pretrained_no_processing(
-                model_name,
-                device=device,
-                dtype=self.model_dtype,
-            )
+        # Load the model normally - HookedTransformer should handle the context window automatically
+        self.model = HookedTransformer.from_pretrained_no_processing(
+            model_name,
+            device=device,
+            dtype=self.model_dtype,
+        )
         self.model.eval()
+        
+        # Check the model's actual context window
+        print(f"Model context window: {self.model.cfg.n_ctx}")
         
         # Cache for activations
         self._activation_cache = {}
