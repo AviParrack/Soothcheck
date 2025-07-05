@@ -407,29 +407,30 @@ def main():
             if branch_name not in item['conversations']:
                 item['conversations'][branch_name] = {}
             
-            # Get or create probe_scores dictionary
+            # Add probe to available_probes
+            if 'available_probes' not in item['conversations'][branch_name]:
+                item['conversations'][branch_name]['available_probes'] = []
+            if probe_name not in item['conversations'][branch_name]['available_probes']:
+                item['conversations'][branch_name]['available_probes'].append(probe_name)
+            
+            # Initialize probe_scores if needed
             if 'probe_scores' not in item['conversations'][branch_name]:
                 item['conversations'][branch_name]['probe_scores'] = {}
             
-            # Store scores under probe name
-            probe_scores = {
-                'token_scores': score_list['token_scores'],
-                'layer': args.layer,
-                'mean_score': float(score_list['mean_score']),
-                'predicted_label': int(score_list['mean_score'] > threshold),
-                'tokens': score_list['tokens']  # Store tokens for validation
-            }
+            # Store scores directly as a list like pairs_probe and rp_probe
+            item['conversations'][branch_name]['probe_scores'][probe_name] = score_list['token_scores']
             
-            # Store under probe name (similar to Pairs and RP probe structure)
-            item['conversations'][branch_name]['probe_scores'][probe_name] = probe_scores
+            # Store tokens separately for debugging (temporary)
+            if 'debug' not in item['conversations'][branch_name]:
+                item['conversations'][branch_name]['debug'] = {}
+            item['conversations'][branch_name]['debug']['tokens'] = score_list['tokens']
             
             # Validate the stored data
             print(f"\nValidating stored data for sample {item.get('id', 'unknown')}:")
             print(f"  Branch: {branch_name}")
             print(f"  Probe: {probe_name}")
-            print(f"  Token count: {len(probe_scores['token_scores'])}")
-            print(f"  Mean score: {probe_scores['mean_score']:.4f}")
-            print(f"  Predicted label: {probe_scores['predicted_label']}")
+            print(f"  Token count: {len(score_list['token_scores'])}")
+            print(f"  Available probes: {item['conversations'][branch_name]['available_probes']}")
     
     # Save augmented data
     print(f"\nSaving results to {output_file}")
