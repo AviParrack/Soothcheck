@@ -47,69 +47,84 @@ def extract_conversations(data: List[Dict]) -> List[Dict[str, str]]:
     Returns:
         List of dictionaries mapping conversation branch names to their text content
     """
-    print("DEBUG: extract_conversations() called - character cleaning should happen here")
+    print("DEBUG: extract_conversations() called")
+    print(f"DEBUG: Processing {len(data)} data items")
+    
     all_conversations = []
     for item_idx, item in enumerate(data):
+        print(f"\nDEBUG: Processing item {item_idx}")
+        print(f"DEBUG: Item keys: {list(item.keys())}")
+        
+        # Show metadata
+        metadata = item.get('metadata', {})
+        print(f"DEBUG: Metadata: {metadata}")
+        
         # Get all conversation branches
         conversations = item.get('conversations', {})
+        print(f"DEBUG: Found {len(conversations)} conversation branches: {list(conversations.keys())}")
+        
         conv_dict = {}
         
         # Process each conversation branch
         for branch_name, branch_data in conversations.items():
-            conv = ""
+            print(f"\nDEBUG: Processing branch '{branch_name}'")
+            print(f"DEBUG: Branch data keys: {list(branch_data.keys())}")
+            
+            # Check if this branch has messages
             messages = branch_data.get('messages', [])
+            print(f"DEBUG: Found {len(messages)} messages in branch '{branch_name}'")
+            
+            conv = ""
             for msg_idx, msg in enumerate(messages):
-                # Clean malformed characters from message content IMMEDIATELY when reading from JSON
+                print(f"DEBUG: Message {msg_idx}: role='{msg['role']}', content_len={len(msg['content'])}")
+                print(f"DEBUG: Message {msg_idx} content preview: {repr(msg['content'][:100])}")
+                
+                # Clean malformed characters from message content
                 original_content = msg['content']
                 content = original_content
                 
                 # Count malformed characters before cleaning
-                original_c_count = original_content.count('Ċ')  # This is the actual character we need to fix
+                original_c_count = original_content.count('Ċ')
                 original_a_count = original_content.count('Ä')
                 original_i_count = original_content.count('Ĭ')
                 original_ai_count = original_content.count('ÄĬ')
                 
-                if item_idx == 0 and msg_idx <= 2:  # Debug first few messages
-                    print(f"DEBUG: Item {item_idx}, Message {msg_idx} ({msg['role']}):")
-                    print(f"  Original content length: {len(original_content)}")
+                if item_idx == 0:  # Debug first item only
+                    print(f"DEBUG: Item {item_idx}, Branch {branch_name}, Message {msg_idx} ({msg['role']}):")
                     print(f"  Found {original_c_count} 'Ċ' chars, {original_a_count} 'Ä' chars, {original_i_count} 'Ĭ' chars, {original_ai_count} 'ÄĬ' sequences")
-                    print(f"  First 200 chars: {repr(original_content[:200])}")
                 
                 # Fix the ACTUAL issue - Ċ characters should be newlines
-                content = content.replace('Ċ', '\n')  # This is the real fix!
+                content = content.replace('Ċ', '\n')
                 
                 # Also handle the display corruption we were chasing
-                content = content.replace('ÄĬ', '\n')  # Combined sequence
-                content = content.replace('Ä', '\n')   # Separate Ä character  
-                content = content.replace('Ĭ', '\n')   # Separate Ĭ character
+                content = content.replace('ÄĬ', '\n')
+                content = content.replace('Ä', '\n')   
+                content = content.replace('Ĭ', '\n')
                 
                 # Clean up multiple consecutive newlines
                 content = re.sub(r'\n+', '\n', content)
                 
-                # Count characters after cleaning
-                remaining_c_count = content.count('Ċ')
-                remaining_a_count = content.count('Ä')
-                remaining_i_count = content.count('Ĭ')
-                remaining_ai_count = content.count('ÄĬ')
+                if item_idx == 0:  # Debug first item only
+                    remaining_c_count = content.count('Ċ')
+                    remaining_a_count = content.count('Ä')
+                    remaining_i_count = content.count('Ĭ')
+                    remaining_ai_count = content.count('ÄĬ')
+                    print(f"  After cleaning: {remaining_c_count} 'Ċ', {remaining_a_count} 'Ä', {remaining_i_count} 'Ĭ', {remaining_ai_count} 'ÄĬ'")
+                    print(f"  Cleaned content preview: {repr(content[:200])}")
                 
-                if item_idx == 0 and msg_idx <= 2:  # Debug first few messages
-                    print(f"  After cleaning:")
-                    print(f"    Content length: {len(content)}")
-                    print(f"    Remaining {remaining_c_count} 'Ċ' chars, {remaining_a_count} 'Ä' chars, {remaining_i_count} 'Ĭ' chars, {remaining_ai_count} 'ÄĬ' sequences")
-                    print(f"    First 200 chars: {repr(content[:200])}")
-                    print(f"    Characters cleaned: {original_c_count + original_a_count + original_i_count + original_ai_count}")
-                    
-                    # Show what the content looks like after Ċ -> \n conversion
-                    print(f"    Content preview after newline conversion:")
-                    print(f"    {repr(content[:300])}")
-                
-                # Include all messages, including system messages
+                # Build conversation in simple format for parsing
                 conv += f"{msg['role']}: {content}\n"
-            conv_dict[branch_name] = conv.strip()
+            
+            conv_text = conv.strip()
+            conv_dict[branch_name] = conv_text
+            print(f"DEBUG: Branch '{branch_name}' final conversation length: {len(conv_text)} chars")
+            print(f"DEBUG: Branch '{branch_name}' conversation preview: {repr(conv_text[:300])}")
         
         all_conversations.append(conv_dict)
     
-    print(f"DEBUG: extract_conversations() completed - processed {len(all_conversations)} conversations")
+    print(f"\nDEBUG: extract_conversations() completed - processed {len(all_conversations)} conversations")
+    print(f"DEBUG: Total branches across all conversations: {sum(len(conv) for conv in all_conversations)}")
+    
     return all_conversations
 
 def load_probe(probe_path: str, device: str) -> BaseProbe:
