@@ -777,7 +777,12 @@ class HuggingFaceProbeEvaluator:
                 try:
                     # Tokenize to get tokens and find position indices
                     tokens = self.tokenizer.encode(text, add_special_tokens=False)
-                    token_strings = [self.tokenizer.decode([t]) for t in tokens]
+                    
+                    # Use the standard HuggingFace tokenizer decode - this should handle SentencePiece properly
+                    token_strings = []
+                    for token_id in tokens:
+                        token_str = self.tokenizer.decode([token_id], skip_special_tokens=False)
+                        token_strings.append(token_str)
                     
                     # Get activations for all positions
                     activations = self.get_layer_activations(text, layer_idx, position_idx=None)  # Get all positions
