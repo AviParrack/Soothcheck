@@ -64,10 +64,6 @@ class OptimizedBatchProbeEvaluator:
             from transformers import AutoTokenizer
             tokenizer = AutoTokenizer.from_pretrained(self.model.cfg.model_name)
         
-        # Set larger context window
-        max_model_length = 4096  # Increased context window
-        print(f"Using sequence length: {max_model_length}")
-        
         # Process in smaller batches with memory cleanup
         all_activations = {layer: [] for layer in layers}
         all_tokens = []
@@ -86,12 +82,13 @@ class OptimizedBatchProbeEvaluator:
                 
                 batch_texts = texts[i:i + actual_batch_size]
                 
-                # Tokenize batch without truncation
+                # Tokenize batch
                 tokens = tokenizer(
                     batch_texts, 
                     return_tensors="pt", 
                     padding=True,
-                    truncation=False,
+                    truncation=True,
+                    max_length=4096,
                     add_special_tokens=False
                 ).to(self.device)
                 
@@ -137,7 +134,7 @@ class OptimizedBatchProbeEvaluator:
                             print(f"Text {len(all_tokens)}: {len(token_texts)} tokens")
                             print(f"  First 5: {token_texts[:5]}")
                             print(f"  Last 5: {token_texts[-5:]}")
-                
+                    
                 except RuntimeError as e:
                     if "out of memory" in str(e):
                         print(f"\nOOM with batch size {actual_batch_size}")
