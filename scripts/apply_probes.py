@@ -9,6 +9,7 @@ import torch
 from pathlib import Path
 from tqdm import tqdm
 from typing import Dict, List, Optional
+import datetime
 
 from probity.probes import BaseProbe, LogisticProbe, LogisticProbeConfig
 from probity.evaluation.batch_evaluator import OptimizedBatchProbeEvaluator
@@ -37,15 +38,16 @@ def save_jsonl(data: List[Dict], file_path: str):
             f.write(json.dumps(item) + '\n')
 
 def extract_conversations(data: List[Dict]) -> List[str]:
-    """Extract conversations from B2W data format."""
+    """Extract conversation text from messages."""
     conversations = []
     for item in data:
-        # Combine messages into a single string, preserving roles
-        conv = ""
-        for msg in item['messages']:
-            if msg['role'] != 'system':  # Skip system messages as they're not part of the conversation
-                conv += f"{msg['role']}: {msg['content']}\n"
-        conversations.append(conv.strip())
+        # Combine messages into a single string
+        conversation = ""
+        for msg in item.get('messages', []):
+            role = msg.get('role', '')
+            content = msg.get('content', '')
+            conversation += f"{role}: {content}\n"
+        conversations.append(conversation.strip())
     return conversations
 
 def load_probe(probe_path: str, device: str) -> BaseProbe:
@@ -178,11 +180,11 @@ def compute_critical_scores(all_samples, data):
     """Compute mean scores for critical tokens only."""
     critical_scores = []
     for sample, item in zip(all_samples, data):
-        if 'critical_analysis' not in item:
+        # Get critical indices from token_analysis
+        if 'token_analysis' not in item or not item['token_analysis'].get('critical_indices'):
             continue
             
-        # Get critical indices from the critical_analysis field
-        critical_indices = item['critical_analysis'].get('critical_indices', [])
+        critical_indices = item['token_analysis']['critical_indices']
         if not critical_indices:
             continue
             
@@ -193,8 +195,7 @@ def compute_critical_scores(all_samples, data):
                 'mean_score': float(sum(critical_token_scores) / len(critical_token_scores)),
                 'token_scores': critical_token_scores,
                 'indices': critical_indices,
-                'critical_claim': item['critical_analysis'].get('critical_claim', ''),
-                'user_query': item['critical_analysis'].get('user_query', '')
+                'tokens': [item['token_analysis']['tokens'][i] for i in critical_indices if i < len(item['token_analysis']['tokens'])]
             })
         
     return critical_scores
@@ -349,9 +350,8 @@ def main():
         print("\nPer-sample critical token analysis:")
         for i, result in enumerate(critical_results):
             print(f"\nSample {i}:")
-            print(f"  User query: {result['user_query']}")
-            print(f"  Critical claim: {result['critical_claim']}")
             print(f"  Critical token count: {len(result['indices'])}")
+            print(f"  Critical tokens: {' '.join(result['tokens'])}")
             print(f"  Mean critical score: {result['mean_score']:.4f}")
             print(f"  Score range: {min(result['token_scores']):.4f} - {max(result['token_scores']):.4f}")
         
@@ -439,21 +439,60 @@ def main():
     print("\nAdding scores to data")
     probe_name = Path(args.probe_path).stem
     for item, score_list in zip(data, all_samples):
-        item['token_scores'] = score_list['token_scores']
-        item['probe_name'] = probe_name
-        item['layer'] = args.layer
-        item['mean_score'] = float(score_list['mean_score'])
-        item['predicted_label'] = int(score_list['mean_score'] > threshold)
+        # Add token scores
+        if 'token_analysis' not in item:
+            item['token_analysis'] = {}
+        item['token_analysis']['token_scores'] = score_list['token_scores']
         
-        # Add critical token scores if available
-        if 'critical_analysis' in item and isinstance(item['critical_analysis'], dict):
-            critical_indices = item['critical_analysis'].get('critical_token_indices', [])
-            if critical_indices:
-                critical_token_scores = [score_list['token_scores'][i] for i in critical_indices if i < len(score_list['token_scores'])]
-                if critical_token_scores:
-                    item['critical_token_scores'] = critical_token_scores
-                    item['critical_mean_score'] = float(sum(critical_token_scores) / len(critical_token_scores))
-                    item['critical_predicted_label'] = int(item['critical_mean_score'] > threshold)
+        # Add monitor results
+        if 'monitor_results' not in item:
+            item['monitor_results'] = []
+            
+        # Add probe results
+        probe_result = {
+            "monitor": {
+                "name": f"probe_{probe_name}",
+                "method": "full_averaging",
+                "probe": probe_name,
+                "model": args.model_name,
+                "metadata": None
+            },
+            "result": {
+                "suspiciousness": float(score_list['mean_score']),
+                "reasoning": {
+                    "type": "mean",
+                    "num_scores": len(score_list['token_scores'])
+                },
+                "metadata": {}
+            },
+            "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat()
+        }
+        item['monitor_results'].append(probe_result)
+        
+        # Add critical analysis if available
+        if item['token_analysis'].get('critical_indices'):
+            critical_scores = [score_list['token_scores'][i] for i in item['token_analysis']['critical_indices'] 
+                            if i < len(score_list['token_scores'])]
+            if critical_scores:
+                critical_result = {
+                    "monitor": {
+                        "name": f"critical_{probe_name}",
+                        "method": "critical_averaging",
+                        "probe": probe_name,
+                        "model": args.model_name,
+                        "metadata": None
+                    },
+                    "result": {
+                        "suspiciousness": float(sum(critical_scores) / len(critical_scores)),
+                        "reasoning": {
+                            "type": "critical",
+                            "num_scores": len(critical_scores)
+                        },
+                        "metadata": {}
+                    },
+                    "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat()
+                }
+                item['monitor_results'].append(critical_result)
     
     # Save augmented data
     print(f"\nSaving results to {output_file}")

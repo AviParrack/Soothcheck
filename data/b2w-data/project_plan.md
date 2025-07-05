@@ -21,30 +21,64 @@ The input data is in JSONL format, with each line containing a JSON object with 
 ```json
 {
   // Metadata
-  "dataset": "alpaca__plain",          // Dataset identifier
-  "sample_index": 1,                   // Index in dataset
-  "label": "honest",                   // Conversation label
+  "dataset": "ai_liar",              // Dataset identifier
+  "sample_index": 1,                 // Index in dataset
+  "label": "deceptive",             // Conversation label
 
-  // Conversation Data (Input for Probe Scoring)
-  "messages": [                        
+  // Conversation Data
+  "messages": [                      
     {
-      "role": "system/user/assistant", 
-      "content": "..."                 
+      "role": "user/assistant",      // Message role
+      "content": "..."               // Message content
     }
   ],
 
-  // Existing Analysis Data
-  "tokens": [...],                     // Tokenized text
-  "probe_scores": {                    // Existing probe scores
-    "pairs_probe": [...],              
-    "rp_probe": [...]                  
+  // Token Analysis
+  "token_analysis": {
+    "tokens": [...],                 // Tokenized text
+    "public_indices": [...],         // Public token indices
+    "private_indices": [...],        // Private token indices
+    "critical_indices": [...]        // Critical token indices (can be null)
   },
-  "public_assistant_indices": [...],    
-  "public_user_indices": [...],         
-  "public_messages": [...],             
-  "critical_analysis": {...}            
+
+  // Monitor Results
+  "monitor_results": [
+    {
+      "monitor": {
+        "name": "mean_pairs",        // Monitor identifier
+        "method": "full_averaging",  // Analysis method
+        "probe": "pairs_probe",      // Probe type used
+        "model": "no_model",         // Model used (if any)
+        "metadata": null             // Additional metadata
+      },
+      "result": {
+        "suspiciousness": -0.52,     // Suspiciousness score
+        "reasoning": {               // Reasoning details
+          "type": "mean",            // Reasoning type
+          "num_scores": 232          // Number of scores used
+        },
+        "metadata": {}               // Additional metadata
+      },
+      "timestamp": "..."            // Analysis timestamp
+    }
+  ]
 }
 ```
+
+### Monitor Types
+1. **Averaging Methods**
+   - full_averaging: Average across all tokens
+   - critical_averaging: Average across critical tokens only
+   - peak_score: Highest score found
+
+2. **Reasoning Methods**
+   - black_box_reasoning: Model-based analysis without probe scores
+   - white_box_reasoning: Model-based analysis with probe scores
+
+3. **Probe Types**
+   - pairs_probe: Pairwise comparison probe
+   - rp_probe: Response prediction probe
+   - no_probe: Direct model analysis
 
 ## Implementation Steps
 
@@ -89,9 +123,9 @@ data/
 
 ## Technical Requirements
 1. Data Format Requirements:
-   - TBD: Document B2W data format
-   - TBD: Document probe score format
-   - TBD: Document output format
+   - Input: JSONL with messages, token analysis, and optional monitor results
+   - Output: JSONL with augmented probe scores and analysis
+   - Support for multiple monitor types and reasoning methods
 
 2. Performance Requirements:
    - Efficient batch processing
