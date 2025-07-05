@@ -11,6 +11,9 @@ from sklearn.metrics import roc_auc_score, accuracy_score, precision_score, reca
 from tqdm import tqdm
 import matplotlib.pyplot as plt
 import seaborn as sns
+import torch.nn as nn
+from transformers import AutoTokenizer, AutoModelForCausalLM
+import gc
 
 from probity.probes import (
     BaseProbe,
@@ -574,3 +577,258 @@ class OptimizedBatchProbeEvaluator:
             'chunk_position_index': chunk_position_idx,
             'processing_method': 'chunked'
         }
+
+class HuggingFaceProbeEvaluator:
+    """
+    Probe evaluator using HuggingFace transformers directly for extended context support.
+    This avoids TransformerLens limitations with RoPE scaling and position embeddings.
+    """
+    
+    def __init__(self, model_name: str, device: str = "cuda", dtype: torch.dtype = torch.bfloat16):
+        self.model_name = model_name
+        self.device = device
+        self.dtype = dtype
+        
+        print(f"Loading model {model_name} with HuggingFace transformers...")
+        
+        # Load tokenizer
+        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
+        if self.tokenizer.pad_token is None:
+            self.tokenizer.pad_token = self.tokenizer.eos_token
+        
+        # Load model with proper configuration for extended context
+        self.model = AutoModelForCausalLM.from_pretrained(
+            model_name,
+            torch_dtype=dtype,
+            device_map="auto",
+            trust_remote_code=True
+        )
+        
+        # Check context window
+        config = self.model.config
+        max_pos = getattr(config, 'max_position_embeddings', 'unknown')
+        print(f"Model max position embeddings: {max_pos}")
+        
+        # Store activations during forward pass
+        self.stored_activations = {}
+        self.hooks = []
+        
+    def register_activation_hook(self, layer_idx: int):
+        """Register a hook to capture activations from a specific layer."""
+        def hook_fn(module, input, output):
+            # Store the hidden states (first element of output tuple)
+            if isinstance(output, tuple):
+                self.stored_activations[f'layer_{layer_idx}'] = output[0].detach()
+            else:
+                self.stored_activations[f'layer_{layer_idx}'] = output.detach()
+        
+        # Register hook on the specified layer
+        hook = self.model.model.layers[layer_idx].register_forward_hook(hook_fn)
+        self.hooks.append(hook)
+        return hook
+    
+    def clear_hooks(self):
+        """Remove all registered hooks."""
+        for hook in self.hooks:
+            hook.remove()
+        self.hooks = []
+    
+    def get_layer_activations(self, text: str, layer_idx: int, position_idx: Optional[int] = None) -> torch.Tensor:
+        """
+        Extract activations from a specific layer for given text.
+        
+        Args:
+            text: Input text
+            layer_idx: Layer index to extract from (0-based)
+            position_idx: Specific token position to extract (if None, returns all positions)
+            
+        Returns:
+            Tensor of activations [batch_size, seq_len, hidden_dim] or [batch_size, hidden_dim] if position specified
+        """
+        # Clear previous activations
+        self.stored_activations = {}
+        
+        # Register hook for target layer
+        hook = self.register_activation_hook(layer_idx)
+        
+        try:
+            # Tokenize input
+            inputs = self.tokenizer(
+                text,
+                return_tensors="pt",
+                padding=False,
+                truncation=False,  # Don't truncate - use full context
+                add_special_tokens=False
+            ).to(self.device)
+            
+            # Check sequence length
+            seq_len = inputs['input_ids'].shape[1]
+            print(f"Processing sequence of length: {seq_len}")
+            
+            # Forward pass to capture activations
+            with torch.no_grad():
+                _ = self.model(**inputs, output_hidden_states=False)
+            
+            # Get stored activations
+            layer_key = f'layer_{layer_idx}'
+            if layer_key not in self.stored_activations:
+                raise ValueError(f"No activations captured for layer {layer_idx}")
+            
+            activations = self.stored_activations[layer_key]  # [batch_size, seq_len, hidden_dim]
+            
+            # Extract specific position if requested
+            if position_idx is not None:
+                if position_idx >= activations.shape[1]:
+                    raise IndexError(f"Position {position_idx} exceeds sequence length {activations.shape[1]}")
+                activations = activations[:, position_idx, :]  # [batch_size, hidden_dim]
+            
+            return activations
+            
+        finally:
+            # Clean up
+            hook.remove()
+            self.stored_activations = {}
+            torch.cuda.empty_cache()
+            gc.collect()
+    
+    def evaluate_with_probe(self, text: str, probe: nn.Module, layer_idx: int, position_idx: int) -> Dict[str, Any]:
+        """
+        Evaluate a single text with a probe at a specific layer and position.
+        
+        Args:
+            text: Input text
+            probe: Probe model
+            layer_idx: Layer to extract activations from
+            position_idx: Token position to evaluate
+            
+        Returns:
+            Dictionary with probe predictions and metadata
+        """
+        try:
+            # Get activations at specified layer and position
+            activations = self.get_layer_activations(text, layer_idx, position_idx)
+            
+            # Apply probe
+            with torch.no_grad():
+                probe_output = probe(activations)
+                
+                # Convert to probabilities if needed
+                if probe_output.dim() == 2 and probe_output.shape[1] == 1:
+                    # Binary classification
+                    prob = torch.sigmoid(probe_output).item()
+                    prediction = int(prob > 0.5)
+                else:
+                    # Multi-class or other format
+                    probs = torch.softmax(probe_output, dim=-1)
+                    prediction = torch.argmax(probs, dim=-1).item()
+                    prob = probs.max().item()
+            
+            return {
+                'prediction': prediction,
+                'probability': prob,
+                'raw_output': probe_output.cpu().numpy(),
+                'layer': layer_idx,
+                'position': position_idx,
+                'sequence_length': len(self.tokenizer.encode(text, add_special_tokens=False)),
+                'success': True
+            }
+            
+        except Exception as e:
+            return {
+                'prediction': None,
+                'probability': None,
+                'raw_output': None,
+                'layer': layer_idx,
+                'position': position_idx,
+                'error': str(e),
+                'success': False
+            }
+    
+    def __del__(self):
+        """Clean up hooks when object is deleted."""
+        self.clear_hooks()
+    
+    def evaluate_all_probes(self, texts: List[str], labels: List[int], probe_configs: Dict[Tuple[int, str], nn.Module]) -> Dict[Tuple[int, str], Dict[str, Any]]:
+        """
+        Evaluate all probes on the given texts, matching the interface expected by apply_probes.py.
+        
+        Args:
+            texts: List of conversation texts
+            labels: List of binary labels (0/1)
+            probe_configs: Dictionary mapping (layer, probe_name) to probe modules
+            
+        Returns:
+            Dictionary mapping probe keys to results with all_samples and mean_scores
+        """
+        results = {}
+        
+        for (layer_idx, probe_name), probe in probe_configs.items():
+            print(f"\nEvaluating probe {probe_name} on layer {layer_idx}")
+            
+            all_samples = []
+            mean_scores = []
+            
+            for i, (text, label) in enumerate(zip(texts, labels)):
+                if not text.strip():  # Skip empty texts
+                    continue
+                    
+                print(f"Processing sample {i+1}/{len(texts)}")
+                
+                try:
+                    # Tokenize to get tokens and find position indices
+                    tokens = self.tokenizer.encode(text, add_special_tokens=False)
+                    token_strings = [self.tokenizer.decode([t]) for t in tokens]
+                    
+                    # Get activations for all positions
+                    activations = self.get_layer_activations(text, layer_idx, position_idx=None)  # Get all positions
+                    
+                    # Apply probe to all positions
+                    token_scores = []
+                    with torch.no_grad():
+                        for pos in range(activations.shape[1]):
+                            pos_activation = activations[:, pos, :]  # [batch_size, hidden_dim]
+                            probe_output = probe(pos_activation)
+                            
+                            # Convert to probability/score
+                            if probe_output.dim() == 2 and probe_output.shape[1] == 1:
+                                score = torch.sigmoid(probe_output).item()
+                            else:
+                                score = torch.softmax(probe_output, dim=-1).max().item()
+                            
+                            token_scores.append(score)
+                    
+                    # Calculate mean score
+                    mean_score = np.mean(token_scores)
+                    
+                    sample_result = {
+                        'text': text,
+                        'tokens': token_strings,
+                        'token_scores': token_scores,
+                        'mean_score': mean_score,
+                        'label': label
+                    }
+                    
+                    all_samples.append(sample_result)
+                    mean_scores.append(mean_score)
+                    
+                    print(f"  Sample {i+1}: mean_score={mean_score:.4f}, tokens={len(token_strings)}")
+                    
+                except Exception as e:
+                    print(f"  Error processing sample {i+1}: {e}")
+                    # Add empty result to maintain alignment
+                    sample_result = {
+                        'text': text,
+                        'tokens': [],
+                        'token_scores': [],
+                        'mean_score': 0.0,
+                        'label': label
+                    }
+                    all_samples.append(sample_result)
+                    mean_scores.append(0.0)
+            
+            results[(layer_idx, probe_name)] = {
+                'all_samples': all_samples,
+                'mean_scores': mean_scores
+            }
+        
+        return results
