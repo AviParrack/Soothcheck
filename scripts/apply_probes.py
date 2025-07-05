@@ -47,8 +47,9 @@ def extract_conversations(data: List[Dict]) -> List[Dict[str, str]]:
     Returns:
         List of dictionaries mapping conversation branch names to their text content
     """
+    print("DEBUG: extract_conversations() called - character cleaning should happen here")
     all_conversations = []
-    for item in data:
+    for item_idx, item in enumerate(data):
         # Get all conversation branches
         conversations = item.get('conversations', {})
         conv_dict = {}
@@ -57,9 +58,21 @@ def extract_conversations(data: List[Dict]) -> List[Dict[str, str]]:
         for branch_name, branch_data in conversations.items():
             conv = ""
             messages = branch_data.get('messages', [])
-            for msg in messages:
+            for msg_idx, msg in enumerate(messages):
                 # Clean malformed characters from message content IMMEDIATELY when reading from JSON
-                content = msg['content']
+                original_content = msg['content']
+                content = original_content
+                
+                # Count malformed characters before cleaning
+                original_a_count = original_content.count('Ä')
+                original_i_count = original_content.count('Ĭ')
+                original_ai_count = original_content.count('ÄĬ')
+                
+                if item_idx == 0 and msg_idx <= 2:  # Debug first few messages
+                    print(f"DEBUG: Item {item_idx}, Message {msg_idx} ({msg['role']}):")
+                    print(f"  Original content length: {len(original_content)}")
+                    print(f"  Found {original_a_count} 'Ä' chars, {original_i_count} 'Ĭ' chars, {original_ai_count} 'ÄĬ' sequences")
+                    print(f"  First 200 chars: {repr(original_content[:200])}")
                 
                 # Fix malformed character encoding - these should be newlines
                 content = content.replace('ÄĬ', '\n')  # Combined sequence
@@ -69,11 +82,25 @@ def extract_conversations(data: List[Dict]) -> List[Dict[str, str]]:
                 # Clean up multiple consecutive newlines
                 content = re.sub(r'\n+', '\n', content)
                 
+                # Count characters after cleaning
+                remaining_a_count = content.count('Ä')
+                remaining_i_count = content.count('Ĭ')
+                remaining_ai_count = content.count('ÄĬ')
+                
+                if item_idx == 0 and msg_idx <= 2:  # Debug first few messages
+                    print(f"  After cleaning:")
+                    print(f"    Content length: {len(content)}")
+                    print(f"    Remaining {remaining_a_count} 'Ä' chars, {remaining_i_count} 'Ĭ' chars, {remaining_ai_count} 'ÄĬ' sequences")
+                    print(f"    First 200 chars: {repr(content[:200])}")
+                    print(f"    Characters cleaned: {original_a_count + original_i_count + original_ai_count}")
+                
                 # Include all messages, including system messages
                 conv += f"{msg['role']}: {content}\n"
             conv_dict[branch_name] = conv.strip()
         
         all_conversations.append(conv_dict)
+    
+    print(f"DEBUG: extract_conversations() completed - processed {len(all_conversations)} conversations")
     return all_conversations
 
 def load_probe(probe_path: str, device: str) -> BaseProbe:
