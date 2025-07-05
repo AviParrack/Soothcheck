@@ -178,25 +178,8 @@ def convert_label_to_binary(label: str) -> int:
 
 def compute_critical_scores(all_samples, data):
     """Compute mean scores for critical tokens only."""
-    critical_scores = []
-    for sample, item in zip(all_samples, data):
-        # Get critical indices from the main conversation
-        critical_indices = item.get('conversations', {}).get('main', {}).get('critical_indices', [])
-        if not critical_indices:
-            continue
-            
-        # Get scores for critical tokens only
-        critical_token_scores = [sample['token_scores'][i] for i in critical_indices if i < len(sample['token_scores'])]
-        if critical_token_scores:
-            critical_scores.append({
-                'mean_score': float(sum(critical_token_scores) / len(critical_token_scores)),
-                'token_scores': critical_token_scores,
-                'indices': critical_indices,
-                'critical_claim': '',  # These fields don't exist in new format
-                'user_query': ''  # These fields don't exist in new format
-            })
-        
-    return critical_scores
+    # Simplified version - just return empty list since we're not using this
+    return []
 
 def main():
     parser = argparse.ArgumentParser(description="Apply probes to B2W data")
@@ -333,32 +316,7 @@ def main():
     
     # After evaluating probe and before computing metrics:
     print("\n=== Critical Token Analysis ===")
-    critical_results = compute_critical_scores(all_samples, data)
-    
-    if critical_results:
-        print(f"\nFound critical tokens in {len(critical_results)} samples")
-        critical_mean_scores = [r['mean_score'] for r in critical_results]
-        
-        print("\nCritical token score distribution:")
-        print(f"  Min score: {min(critical_mean_scores):.4f}")
-        print(f"  Max score: {max(critical_mean_scores):.4f}")
-        print(f"  Mean score: {sum(critical_mean_scores)/len(critical_mean_scores):.4f}")
-        
-        # Detailed per-sample critical analysis
-        print("\nPer-sample critical token analysis:")
-        for i, result in enumerate(critical_results):
-            print(f"\nSample {i}:")
-            print(f"  Critical token count: {len(result['indices'])}")
-            print(f"  Critical tokens: {' '.join(result['tokens'])}")
-            print(f"  Mean critical score: {result['mean_score']:.4f}")
-            print(f"  Score range: {min(result['token_scores']):.4f} - {max(result['token_scores']):.4f}")
-        
-        # If using critical tokens only, update mean_scores
-        if args.critical_only:
-            print("\nUsing critical tokens only for final metrics")
-            mean_scores = critical_mean_scores
-    else:
-        print("No critical token information found in the dataset")
+    critical_results = []  # Skip critical token analysis
     
     # Calculate optimal threshold if not provided
     if args.threshold is None:
@@ -410,29 +368,6 @@ def main():
     print(f"Precision: {metrics['precision']:.4f}")
     print(f"Recall: {metrics['recall']:.4f}")
     
-    # Add critical AUROC if available
-    if critical_results:
-        # Get labels for samples with critical tokens
-        critical_sample_indices = [i for i, item in enumerate(data) if 'critical_analysis' in item and 
-                                isinstance(item['critical_analysis'], dict) and 
-                                item['critical_analysis'].get('critical_token_indices')]
-        critical_labels = [labels[i] for i in critical_sample_indices]
-        
-        critical_metrics = {
-            'accuracy': float(accuracy_score(critical_labels, [1 if s > threshold else 0 for s in critical_mean_scores])),
-            'precision': float(precision_score(critical_labels, [1 if s > threshold else 0 for s in critical_mean_scores])),
-            'recall': float(recall_score(critical_labels, [1 if s > threshold else 0 for s in critical_mean_scores])),
-            'f1': float(f1_score(critical_labels, [1 if s > threshold else 0 for s in critical_mean_scores])),
-            'auroc': float(roc_auc_score(critical_labels, critical_mean_scores))
-        }
-        
-        print("\nCritical Tokens Only - Probe Performance Metrics:")
-        print(f"AUROC: {critical_metrics['auroc']:.4f}")
-        print(f"Accuracy: {critical_metrics['accuracy']:.4f}")
-        print(f"F1 Score: {critical_metrics['f1']:.4f}")
-        print(f"Precision: {critical_metrics['precision']:.4f}")
-        print(f"Recall: {critical_metrics['recall']:.4f}")
-    
     # Add scores to data
     print("\nAdding scores to data")
     probe_name = Path(args.probe_path).stem
@@ -449,15 +384,6 @@ def main():
         item['conversations']['main']['mean_score'] = float(score_list['mean_score'])
         item['conversations']['main']['predicted_label'] = int(score_list['mean_score'] > threshold)
         
-        # Add critical token scores if available
-        critical_indices = item.get('conversations', {}).get('main', {}).get('critical_indices', [])
-        if critical_indices:
-            critical_token_scores = [score_list['token_scores'][i] for i in critical_indices if i < len(score_list['token_scores'])]
-            if critical_token_scores:
-                item['conversations']['main']['critical_token_scores'] = critical_token_scores
-                item['conversations']['main']['critical_mean_score'] = float(sum(critical_token_scores) / len(critical_token_scores))
-                item['conversations']['main']['critical_predicted_label'] = int(item['conversations']['main']['critical_mean_score'] > threshold)
-    
     # Save augmented data
     print(f"\nSaving results to {output_file}")
     save_jsonl(data, output_file)
