@@ -92,92 +92,66 @@ class OptimizedBatchProbeEvaluator:
         print(f"Text length: {len(conversation_text)}")
         print(f"First 500 chars: {repr(conversation_text[:500])}")
         
-        # Check if this looks like it already has system message embedded
-        if conversation_text.startswith("system:"):
-            print("DEBUG: Conversation starts with system: - this might be the issue")
-            
+        # Clean up malformed characters that should be newlines
+        # Replace ÄĬ sequences with proper newlines
+        cleaned_text = conversation_text.replace('ÄĬ', '\n')
+        print(f"DEBUG: Cleaned {conversation_text.count('ÄĬ')} ÄĬ sequences")
+        
         messages = []
         current_role = None
         current_content = []
         
-        lines = conversation_text.strip().split('\n')
+        lines = cleaned_text.strip().split('\n')
         print(f"DEBUG: Split into {len(lines)} lines")
         
-        # Parse all roles including system, but we'll handle system specially
         for i, line in enumerate(lines):
             line = line.strip()
             if not line:
                 continue
             
-            print(f"DEBUG: Line {i}: {repr(line)}")
+            if i < 5:  # Show first few lines for debugging
+                print(f"DEBUG: Line {i}: {repr(line)}")
                 
-            # Check if this is a role line (system, user, assistant)
+            # Check if this is a role line (system:, user:, assistant:)
             if ':' in line:
                 role_part = line.split(':', 1)[0].strip()
                 if role_part in ['system', 'user', 'assistant']:
-                    print(f"DEBUG: Found role line: {line}")
+                    print(f"DEBUG: Found role line: {role_part}")
                     # Save previous message if exists
                     if current_role is not None and current_content:
+                        content = '\n'.join(current_content).strip()
                         messages.append({
                             "role": current_role,
-                            "content": '\n'.join(current_content).strip()
+                            "content": content
                         })
+                        print(f"DEBUG: Saved {current_role} message with {len(content)} chars")
                     
                     # Start new message
                     current_role = role_part
                     content_part = line.split(':', 1)[1].strip()
                     current_content = [content_part] if content_part else []
-                    if content_part:
-                        print(f"DEBUG: Started {current_role} with content: {repr(content_part)}")
                     continue
             
             # Add to current message content
             if current_role is not None:
                 current_content.append(line)
-                print(f"DEBUG: Added to {current_role}: {repr(line)}")
         
         # Add final message
         if current_role is not None and current_content:
+            content = '\n'.join(current_content).strip()
             messages.append({
                 "role": current_role,
-                "content": '\n'.join(current_content).strip()
+                "content": content
             })
+            print(f"DEBUG: Saved final {current_role} message with {len(content)} chars")
         
         print(f"DEBUG: Parsed {len(messages)} messages:")
         for i, msg in enumerate(messages):
             print(f"  Message {i}: role={msg['role']}, content_len={len(msg['content'])}")
-        
-        # If we have a system message, we need to handle it specially
-        # The original tokenization seems to have the system message embedded in the conversation
-        # So we should NOT use chat template but manually format to match original
-        if messages and messages[0]['role'] == 'system':
-            print("DEBUG: Found system message, using manual formatting to match original")
-            # Don't use chat template, manually format to match original exactly
-            formatted_text = self._format_conversation_manually(messages)
-            print(f"DEBUG: Manual formatting result length: {len(formatted_text)}")
-            print(f"DEBUG: Manual formatting first 200 chars: {repr(formatted_text[:200])}")
-            return formatted_text
+            if msg['role'] == 'system':
+                print(f"    System content preview: {repr(msg['content'][:100])}")
         
         return messages
-        
-    def _format_conversation_manually(self, messages: List[Dict[str, str]]) -> str:
-        """Manually format conversation to match original tokenization exactly"""
-        formatted_parts = []
-        
-        for i, msg in enumerate(messages):
-            role = msg['role']
-            content = msg['content']
-            
-            if role == 'system':
-                # Format system message to match original exactly
-                formatted_parts.append(f"system:\n\n{content}")
-            elif role == 'user':
-                formatted_parts.append(f"user:\n\n{content}")
-            elif role == 'assistant':
-                formatted_parts.append(f"assistant:\n\n{content}")
-        
-        # Join with double newlines to match original format
-        return '\n\n'.join(formatted_parts)
         
     def get_batch_activations(self, texts: List[str], layers: List[int], 
                             batch_size: int = 1) -> Dict[int, torch.Tensor]:
@@ -208,29 +182,23 @@ class OptimizedBatchProbeEvaluator:
                 # Apply chat template to match old pipeline tokenization
                 formatted_texts = []
                 for text in batch_texts:
-                    # Parse the conversation format 
-                    parsed_result = self._parse_conversation_to_messages(text)
-                    
-                    if isinstance(parsed_result, str):
-                        # Manual formatting was used (has system message)
-                        formatted_text = parsed_result
-                    else:
-                        # Regular messages, use chat template
-                        messages = parsed_result
-                        formatted_text = self.tokenizer.apply_chat_template(
-                            messages, 
-                            tokenize=False,
-                            add_generation_prompt=False
-                        )
+                    # Parse the conversation format and apply chat template
+                    messages = self._parse_conversation_to_messages(text)
+                    # Apply chat template to get proper Llama formatting
+                    formatted_text = self.tokenizer.apply_chat_template(
+                        messages, 
+                        tokenize=False,
+                        add_generation_prompt=False
+                    )
                     formatted_texts.append(formatted_text)
                 
-                # Tokenize with appropriate settings
+                # Tokenize with chat template applied (matches old pipeline)
                 tokens = self.tokenizer(
                     formatted_texts, 
                     return_tensors="pt", 
                     padding=True,
                     truncation=True,
-                    add_special_tokens=True  # Need special tokens for manual format
+                    add_special_tokens=False  # Chat template already adds them
                 ).to(self.device)
                 
                 try:
