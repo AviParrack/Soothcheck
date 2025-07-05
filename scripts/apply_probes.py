@@ -13,6 +13,7 @@ from typing import Dict, List, Optional
 from probity.probes import BaseProbe, LogisticProbe, LogisticProbeConfig
 from probity.evaluation.batch_evaluator import OptimizedBatchProbeEvaluator
 from probity.utils.dataset_loading import get_model_dtype
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, roc_auc_score
 
 def load_jsonl(file_path: str, num_samples: Optional[int] = None) -> List[Dict]:
     """Load JSONL file into list of dictionaries.
@@ -191,6 +192,8 @@ def main():
                       help="Device to run on (cuda/cpu)")
     parser.add_argument("--num_samples", type=int, default=None,
                       help="Number of samples to process (default: all)")
+    parser.add_argument("--threshold", type=float, default=None,
+                      help="Classification threshold (default: auto-computed from score distribution)")
     
     args = parser.parse_args()
     
@@ -263,9 +266,44 @@ def main():
         probe_configs=probe_configs
     )
     
-    # Print metrics
+    # Analyze score distribution and set threshold
     probe_key = (args.layer, probe.__class__.__name__)
-    metrics = results[probe_key]['metrics']
+    mean_scores = results[probe_key]['mean_scores']
+    
+    print("\nScore distribution:")
+    print(f"  Min score: {min(mean_scores):.4f}")
+    print(f"  Max score: {max(mean_scores):.4f}")
+    print(f"  Mean score: {sum(mean_scores)/len(mean_scores):.4f}")
+    
+    # Calculate optimal threshold if not provided
+    if args.threshold is None:
+        # Sort scores and find gap between classes
+        sorted_scores = sorted((score, label) for score, label in zip(mean_scores, labels))
+        max_gap = 0
+        best_threshold = 0.5
+        
+        for i in range(len(sorted_scores) - 1):
+            gap = sorted_scores[i + 1][0] - sorted_scores[i][0]
+            if gap > max_gap:
+                max_gap = gap
+                best_threshold = (sorted_scores[i][0] + sorted_scores[i + 1][0]) / 2
+        
+        threshold = best_threshold
+        print(f"\nAuto-computed threshold: {threshold:.4f}")
+    else:
+        threshold = args.threshold
+        print(f"\nUsing provided threshold: {threshold:.4f}")
+    
+    # Recalculate metrics with new threshold
+    predictions = [1 if score > threshold else 0 for score in mean_scores]
+    metrics = {
+        'accuracy': float(accuracy_score(labels, predictions)),
+        'precision': float(precision_score(labels, predictions)),
+        'recall': float(recall_score(labels, predictions)),
+        'f1': float(f1_score(labels, predictions)),
+        'auroc': float(roc_auc_score(labels, mean_scores))
+    }
+    
     print("\nProbe Performance Metrics:")
     print(f"AUROC: {metrics['auroc']:.4f}")
     print(f"Accuracy: {metrics['accuracy']:.4f}")
@@ -273,18 +311,15 @@ def main():
     print(f"Precision: {metrics['precision']:.4f}")
     print(f"Recall: {metrics['recall']:.4f}")
     
-    # Get token scores from results
-    scores = []
-    for sample in results[probe_key]['all_samples']:
-        scores.append(sample['token_scores'])
-    
     # Add scores to data
     print("\nAdding scores to data")
     probe_name = Path(args.probe_path).stem
-    for item, score_list in zip(data, scores):
-        item['token_scores'] = score_list
+    for item, score_list in zip(data, results[probe_key]['all_samples']):
+        item['token_scores'] = score_list['token_scores']
         item['probe_name'] = probe_name
         item['layer'] = args.layer
+        item['mean_score'] = float(score_list['mean_score'])
+        item['predicted_label'] = int(score_list['mean_score'] > threshold)
     
     # Save augmented data
     print(f"\nSaving results to {output_file}")
