@@ -273,8 +273,7 @@ def main():
     
     # Initialize evaluator
     print(f"Initializing evaluator with model {args.model_name}")
-    from probity.evaluation.batch_evaluator import HuggingFaceProbeEvaluator
-    evaluator = HuggingFaceProbeEvaluator(
+    evaluator = OptimizedBatchProbeEvaluator(
         model_name=args.model_name,
         device=args.device
     )
