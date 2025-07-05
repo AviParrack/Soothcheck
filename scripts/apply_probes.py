@@ -37,18 +37,32 @@ def save_jsonl(data: List[Dict], file_path: str):
         for item in data:
             f.write(json.dumps(item) + '\n')
 
-def extract_conversations(data: List[Dict]) -> List[str]:
-    """Extract conversations from B2W data format."""
-    conversations = []
+def extract_conversations(data: List[Dict]) -> List[Dict[str, str]]:
+    """Extract all conversations from B2W data format.
+    
+    Args:
+        data: List of data items
+        
+    Returns:
+        List of dictionaries mapping conversation branch names to their text content
+    """
+    all_conversations = []
     for item in data:
-        # Get messages from the main conversation branch
-        conv = ""
-        messages = item.get('conversations', {}).get('main', {}).get('messages', [])
-        for msg in messages:
-            if msg['role'] != 'system':  # Skip system messages as they're not part of the conversation
+        # Get all conversation branches
+        conversations = item.get('conversations', {})
+        conv_dict = {}
+        
+        # Process each conversation branch
+        for branch_name, branch_data in conversations.items():
+            conv = ""
+            messages = branch_data.get('messages', [])
+            for msg in messages:
+                # Include all messages, including system messages
                 conv += f"{msg['role']}: {msg['content']}\n"
-        conversations.append(conv.strip())
-    return conversations
+            conv_dict[branch_name] = conv.strip()
+        
+        all_conversations.append(conv_dict)
+    return all_conversations
 
 def load_probe(probe_path: str, device: str) -> BaseProbe:
     """Load probe from file."""
@@ -223,7 +237,7 @@ def main():
     
     # Extract conversations and convert labels
     print("\n=== Label Processing ===")
-    conversations = extract_conversations(data)
+    all_conversations = extract_conversations(data)
     
     # Print raw labels before conversion
     print("\nRaw labels before conversion:")
@@ -243,11 +257,11 @@ def main():
     if len(valid_indices) < len(labels):
         print(f"\nFiltered out {len(labels) - len(valid_indices)} samples with skip/unknown labels")
         print("Removed indices:", [i for i in range(len(labels)) if i not in valid_indices])
-        conversations = [conversations[i] for i in valid_indices]
+        all_conversations = [all_conversations[i] for i in valid_indices]
         labels = [labels[i] for i in valid_indices]
         data = [data[i] for i in valid_indices]
     
-    print(f"\nProcessing {len(conversations)} valid samples")
+    print(f"\nProcessing {len(all_conversations)} valid samples")
     print(f"Binary label distribution:")
     print(f"  Deceptive (1): {sum(labels)}")
     print(f"  Honest (0): {len(labels) - sum(labels)}")
@@ -264,126 +278,159 @@ def main():
         device=args.device
     )
     
-    # Evaluate probe
-    print(f"\nEvaluating probe from layer {args.layer}")
-    probe_configs = {(args.layer, probe.__class__.__name__): probe}
-    results = evaluator.evaluate_all_probes(
-        texts=conversations,
-        labels=labels,
-        probe_configs=probe_configs
-    )
-    
-    # Analyze results in detail
-    print("\n=== Detailed Results Analysis ===")
-    probe_key = (args.layer, probe.__class__.__name__)
-    all_samples = results[probe_key]['all_samples']
-    mean_scores = results[probe_key]['mean_scores']
-    
-    print("\nPer-sample analysis:")
-    honest_scores = []
-    deceptive_scores = []
-    
-    for i, (sample, label) in enumerate(zip(all_samples, labels)):
-        score = sample['mean_score']
-        if label == 1:
-            deceptive_scores.append(score)
-        else:
-            honest_scores.append(score)
+    # Process each conversation branch
+    print("\n=== Processing Conversation Branches ===")
+    for branch_name in set().union(*[conv.keys() for conv in all_conversations]):
+        print(f"\nProcessing branch: {branch_name}")
         
-        print(f"\nSample {i}:")
-        print(f"  True label: {label} ({'deceptive' if label == 1 else 'honest'})")
-        print(f"  Mean score: {score:.4f}")
-        print(f"  Text preview: {sample['text'][:100]}...")
-        print(f"  Token count: {len(sample['tokens'])}")
-        print(f"  Score range: {min(sample['token_scores']):.4f} - {max(sample['token_scores']):.4f}")
-    
-    print("\nScore distribution by class:")
-    if honest_scores:
-        print(f"  Honest (0) scores:")
-        print(f"    Min: {min(honest_scores):.4f}")
-        print(f"    Max: {max(honest_scores):.4f}")
-        print(f"    Mean: {sum(honest_scores)/len(honest_scores):.4f}")
-    if deceptive_scores:
-        print(f"  Deceptive (1) scores:")
-        print(f"    Min: {min(deceptive_scores):.4f}")
-        print(f"    Max: {max(deceptive_scores):.4f}")
-        print(f"    Mean: {sum(deceptive_scores)/len(deceptive_scores):.4f}")
-    
-    print("\nOverall score distribution:")
-    print(f"  Min score: {min(mean_scores):.4f}")
-    print(f"  Max score: {max(mean_scores):.4f}")
-    print(f"  Mean score: {sum(mean_scores)/len(mean_scores):.4f}")
-    
-    # After evaluating probe and before computing metrics:
-    print("\n=== Critical Token Analysis ===")
-    critical_results = []  # Skip critical token analysis
-    
-    # Calculate optimal threshold if not provided
-    if args.threshold is None:
-        # Sort scores and find gap between classes
-        sorted_scores = sorted((score, label) for score, label in zip(mean_scores, labels))
-        max_gap = 0
-        best_threshold = 0.5
+        # Extract conversations for this branch
+        branch_conversations = [conv.get(branch_name, "") for conv in all_conversations]
         
-        print("\nGap analysis for threshold:")
-        for i in range(len(sorted_scores) - 1):
-            gap = sorted_scores[i + 1][0] - sorted_scores[i][0]
-            print(f"  Gap between {sorted_scores[i][0]:.4f} ({sorted_scores[i][1]}) and {sorted_scores[i+1][0]:.4f} ({sorted_scores[i+1][1]}): {gap:.4f}")
-            if gap > max_gap:
-                max_gap = gap
-                best_threshold = (sorted_scores[i][0] + sorted_scores[i + 1][0]) / 2
-                print(f"    New best threshold: {best_threshold:.4f}")
+        # Skip empty conversations
+        if not any(branch_conversations):
+            print(f"No conversations found for branch {branch_name}, skipping...")
+            continue
         
-        threshold = best_threshold
-        print(f"\nAuto-computed threshold: {threshold:.4f}")
-    else:
-        threshold = args.threshold
-        print(f"\nUsing provided threshold: {threshold:.4f}")
-    
-    # Recalculate metrics with new threshold
-    predictions = [1 if score > threshold else 0 for score in mean_scores]
-    
-    print("\nConfusion matrix:")
-    tp = sum(1 for p, l in zip(predictions, labels) if p == 1 and l == 1)
-    fp = sum(1 for p, l in zip(predictions, labels) if p == 1 and l == 0)
-    fn = sum(1 for p, l in zip(predictions, labels) if p == 0 and l == 1)
-    tn = sum(1 for p, l in zip(predictions, labels) if p == 0 and l == 0)
-    print(f"  True Positives (deceptive correctly identified): {tp}")
-    print(f"  False Positives (honest misclassified as deceptive): {fp}")
-    print(f"  False Negatives (deceptive misclassified as honest): {fn}")
-    print(f"  True Negatives (honest correctly identified): {tn}")
-    
-    metrics = {
-        'accuracy': float(accuracy_score(labels, predictions)),
-        'precision': float(precision_score(labels, predictions)),
-        'recall': float(recall_score(labels, predictions)),
-        'f1': float(f1_score(labels, predictions)),
-        'auroc': float(roc_auc_score(labels, mean_scores))
-    }
-    
-    print("\nProbe Performance Metrics:")
-    print(f"AUROC: {metrics['auroc']:.4f}")
-    print(f"Accuracy: {metrics['accuracy']:.4f}")
-    print(f"F1 Score: {metrics['f1']:.4f}")
-    print(f"Precision: {metrics['precision']:.4f}")
-    print(f"Recall: {metrics['recall']:.4f}")
-    
-    # Add scores to data
-    print("\nAdding scores to data")
-    probe_name = Path(args.probe_path).stem
-    for item, score_list in zip(data, all_samples):
-        # Store scores in the main conversation branch
-        if 'conversations' not in item:
-            item['conversations'] = {}
-        if 'main' not in item['conversations']:
-            item['conversations']['main'] = {}
+        # Evaluate probe
+        print(f"\nEvaluating probe from layer {args.layer}")
+        probe_configs = {(args.layer, probe.__class__.__name__): probe}
+        results = evaluator.evaluate_all_probes(
+            texts=branch_conversations,
+            labels=labels,
+            probe_configs=probe_configs
+        )
+        
+        # Analyze results in detail
+        print("\n=== Detailed Results Analysis ===")
+        probe_key = (args.layer, probe.__class__.__name__)
+        all_samples = results[probe_key]['all_samples']
+        mean_scores = results[probe_key]['mean_scores']
+        
+        print("\nPer-sample analysis:")
+        honest_scores = []
+        deceptive_scores = []
+        
+        for i, (sample, label) in enumerate(zip(all_samples, labels)):
+            if not sample['text'].strip():  # Skip empty conversations
+                continue
+                
+            score = sample['mean_score']
+            if label == 1:
+                deceptive_scores.append(score)
+            else:
+                honest_scores.append(score)
             
-        item['conversations']['main']['token_scores'] = score_list['token_scores']
-        item['conversations']['main']['probe_name'] = probe_name
-        item['conversations']['main']['layer'] = args.layer
-        item['conversations']['main']['mean_score'] = float(score_list['mean_score'])
-        item['conversations']['main']['predicted_label'] = int(score_list['mean_score'] > threshold)
+            print(f"\nSample {i}:")
+            print(f"  True label: {label} ({'deceptive' if label == 1 else 'honest'})")
+            print(f"  Mean score: {score:.4f}")
+            print(f"  Text preview: {sample['text'][:100]}...")
+            print(f"  Token count: {len(sample['tokens'])}")
+            print(f"  Score range: {min(sample['token_scores']):.4f} - {max(sample['token_scores']):.4f}")
         
+        print("\nScore distribution by class:")
+        if honest_scores:
+            print(f"  Honest (0) scores:")
+            print(f"    Min: {min(honest_scores):.4f}")
+            print(f"    Max: {max(honest_scores):.4f}")
+            print(f"    Mean: {sum(honest_scores)/len(honest_scores):.4f}")
+        if deceptive_scores:
+            print(f"  Deceptive (1) scores:")
+            print(f"    Min: {min(deceptive_scores):.4f}")
+            print(f"    Max: {max(deceptive_scores):.4f}")
+            print(f"    Mean: {sum(deceptive_scores)/len(deceptive_scores):.4f}")
+        
+        print("\nOverall score distribution:")
+        print(f"  Min score: {min(mean_scores):.4f}")
+        print(f"  Max score: {max(mean_scores):.4f}")
+        print(f"  Mean score: {sum(mean_scores)/len(mean_scores):.4f}")
+        
+        # Calculate optimal threshold if not provided
+        if args.threshold is None:
+            # Sort scores and find gap between classes
+            sorted_scores = sorted((score, label) for score, label in zip(mean_scores, labels))
+            max_gap = 0
+            best_threshold = 0.5
+            
+            print("\nGap analysis for threshold:")
+            for i in range(len(sorted_scores) - 1):
+                gap = sorted_scores[i + 1][0] - sorted_scores[i][0]
+                print(f"  Gap between {sorted_scores[i][0]:.4f} ({sorted_scores[i][1]}) and {sorted_scores[i+1][0]:.4f} ({sorted_scores[i+1][1]}): {gap:.4f}")
+                if gap > max_gap:
+                    max_gap = gap
+                    best_threshold = (sorted_scores[i][0] + sorted_scores[i + 1][0]) / 2
+                    print(f"    New best threshold: {best_threshold:.4f}")
+            
+            threshold = best_threshold
+            print(f"\nAuto-computed threshold: {threshold:.4f}")
+        else:
+            threshold = args.threshold
+            print(f"\nUsing provided threshold: {threshold:.4f}")
+        
+        # Recalculate metrics with new threshold
+        predictions = [1 if score > threshold else 0 for score in mean_scores]
+        
+        print("\nConfusion matrix:")
+        tp = sum(1 for p, l in zip(predictions, labels) if p == 1 and l == 1)
+        fp = sum(1 for p, l in zip(predictions, labels) if p == 1 and l == 0)
+        fn = sum(1 for p, l in zip(predictions, labels) if p == 0 and l == 1)
+        tn = sum(1 for p, l in zip(predictions, labels) if p == 0 and l == 0)
+        print(f"  True Positives (deceptive correctly identified): {tp}")
+        print(f"  False Positives (honest misclassified as deceptive): {fp}")
+        print(f"  False Negatives (deceptive misclassified as honest): {fn}")
+        print(f"  True Negatives (honest correctly identified): {tn}")
+        
+        metrics = {
+            'accuracy': float(accuracy_score(labels, predictions)),
+            'precision': float(precision_score(labels, predictions)),
+            'recall': float(recall_score(labels, predictions)),
+            'f1': float(f1_score(labels, predictions)),
+            'auroc': float(roc_auc_score(labels, mean_scores))
+        }
+        
+        print("\nProbe Performance Metrics:")
+        print(f"AUROC: {metrics['auroc']:.4f}")
+        print(f"Accuracy: {metrics['accuracy']:.4f}")
+        print(f"F1 Score: {metrics['f1']:.4f}")
+        print(f"Precision: {metrics['precision']:.4f}")
+        print(f"Recall: {metrics['recall']:.4f}")
+        
+        # Add scores to data
+        print(f"\nAdding scores for branch {branch_name} to data")
+        probe_name = Path(args.probe_path).stem
+        for item, score_list in zip(data, all_samples):
+            if not score_list['text'].strip():  # Skip empty conversations
+                continue
+                
+            # Initialize conversations dict if needed
+            if 'conversations' not in item:
+                item['conversations'] = {}
+            if branch_name not in item['conversations']:
+                item['conversations'][branch_name] = {}
+            
+            # Get or create probe_scores dictionary
+            if 'probe_scores' not in item['conversations'][branch_name]:
+                item['conversations'][branch_name]['probe_scores'] = {}
+            
+            # Store scores under probe name
+            probe_scores = {
+                'token_scores': score_list['token_scores'],
+                'layer': args.layer,
+                'mean_score': float(score_list['mean_score']),
+                'predicted_label': int(score_list['mean_score'] > threshold),
+                'tokens': score_list['tokens']  # Store tokens for validation
+            }
+            
+            # Store under probe name (similar to Pairs and RP probe structure)
+            item['conversations'][branch_name]['probe_scores'][probe_name] = probe_scores
+            
+            # Validate the stored data
+            print(f"\nValidating stored data for sample {item.get('id', 'unknown')}:")
+            print(f"  Branch: {branch_name}")
+            print(f"  Probe: {probe_name}")
+            print(f"  Token count: {len(probe_scores['token_scores'])}")
+            print(f"  Mean score: {probe_scores['mean_score']:.4f}")
+            print(f"  Predicted label: {probe_scores['predicted_label']}")
+    
     # Save augmented data
     print(f"\nSaving results to {output_file}")
     save_jsonl(data, output_file)
