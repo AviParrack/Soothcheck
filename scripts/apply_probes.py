@@ -207,8 +207,8 @@ def main():
                       help="Path to saved probe")
     parser.add_argument("--layer", type=int, required=True,
                       help="Layer number to extract activations from")
-    parser.add_argument("--batch_size", type=int, default=8,
-                      help="Batch size for processing")
+    parser.add_argument("--batch_size", type=int, default=2,
+                      help="Initial batch size for processing (will be reduced if OOM occurs)")
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu",
                       help="Device to run on (cuda/cpu)")
     parser.add_argument("--num_samples", type=int, default=None,

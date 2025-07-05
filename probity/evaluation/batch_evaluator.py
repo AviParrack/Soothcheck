@@ -68,145 +68,112 @@ class OptimizedBatchProbeEvaluator:
         print(f"Tokenizer eos_token_id: {tokenizer.eos_token_id}")
         print(f"Tokenizer vocab size: {len(tokenizer)}")
         
-        # First, let's tokenize a single text to see what's happening
+        # Debug first text tokenization
         if texts:
             print("\n=== DEBUG: Single text tokenization ===")
             sample_text = texts[0]
             print(f"Sample text length: {len(sample_text)}")
-            print(f"Sample text end: ...{sample_text[-100:]}")
-            
-            # Test different tokenization approaches
-            single_tokens1 = tokenizer(sample_text, return_tensors="pt", add_special_tokens=False)
-            single_tokens2 = tokenizer(sample_text, return_tensors="pt", add_special_tokens=True)
-            
-            print(f"Without add_special_tokens: {single_tokens1['input_ids'].shape}")
-            print(f"With add_special_tokens: {single_tokens2['input_ids'].shape}")
-            
-            # Decode the end of both
-            tokens1 = single_tokens1['input_ids'][0]
-            tokens2 = single_tokens2['input_ids'][0]
-            
-            print(f"Last 10 tokens (no special): {tokenizer.convert_ids_to_tokens(tokens1[-10:])}")
-            print(f"Last 10 tokens (with special): {tokenizer.convert_ids_to_tokens(tokens2[-10:])}")
+            tokens = tokenizer(sample_text, return_tensors="pt", add_special_tokens=False)
+            print(f"Token count: {tokens['input_ids'].shape[1]}")
             print("=== END DEBUG ===\n")
         
-        # Process in batches
+        # Process in smaller batches with memory cleanup
         all_activations = {layer: [] for layer in layers}
         all_tokens = []
         
-        num_batches = (len(texts) + batch_size - 1) // batch_size
+        # Reduce batch size for long sequences
+        actual_batch_size = min(batch_size, 4)  # Cap at 4 for safety
+        num_batches = (len(texts) + actual_batch_size - 1) // actual_batch_size
+        
         with torch.no_grad():
-            for i in tqdm(range(0, len(texts), batch_size), total=num_batches, desc="Processing batches"):
-                batch_texts = texts[i:i + batch_size]
+            for i in tqdm(range(0, len(texts), actual_batch_size), total=num_batches, desc="Processing batches"):
+                batch_texts = texts[i:i + actual_batch_size]
+                
+                # Clear CUDA cache
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
                 
                 # Tokenize batch
                 tokens = tokenizer(
                     batch_texts, 
                     return_tensors="pt", 
-                    padding=True,  # Pad to longest in batch
-                    truncation=False,  # No truncation
-                    add_special_tokens=False  # Texts already have special tokens
+                    padding=True,
+                    truncation=False,
+                    add_special_tokens=False
                 ).to(self.device)
                 
-                # Run model with caching
-                _, cache = self.model.run_with_cache(
-                    tokens["input_ids"],
-                    names_filter=hook_points,
-                    return_cache_object=True,
-                    stop_at_layer=max(layers) + 1
-                )
-                
-                # Store activations for each layer - KEEP ORIGINAL DTYPE
-                for layer in layers:
-                    hook_point = f"blocks.{layer}.hook_resid_pre"
-                    # Keep activations in original dtype (bfloat16) - don't convert to CPU yet
-                    all_activations[layer].append(cache[hook_point])
-
-                # Store tokens for later use - FIXED VERSION FOR EOS=PAD
-                for j, text in enumerate(batch_texts):
-                    text_tokens = tokens["input_ids"][j]
+                try:
+                    # Run model with caching
+                    _, cache = self.model.run_with_cache(
+                        tokens["input_ids"],
+                        names_filter=hook_points,
+                        return_cache_object=True,
+                        stop_at_layer=max(layers) + 1
+                    )
                     
-                    if tokenizer.pad_token_id is not None and tokenizer.pad_token_id == tokenizer.eos_token_id:
-                        # Special case: pad_token_id == eos_token_id
-                        # We need to find where padding starts (consecutive eos tokens)
-                        eos_positions = torch.where(text_tokens == tokenizer.eos_token_id)[0]
+                    # Store activations for each layer - move to CPU immediately
+                    for layer in layers:
+                        hook_point = f"blocks.{layer}.hook_resid_pre"
+                        layer_activations = cache[hook_point].cpu()
+                        all_activations[layer].append(layer_activations)
+                        del cache[hook_point]  # Free memory
+                    
+                    del cache  # Free memory
+                    
+                    # Store tokens
+                    for j, text in enumerate(batch_texts):
+                        text_tokens = tokens["input_ids"][j]
+                        if tokenizer.pad_token_id is not None:
+                            pad_positions = torch.where(text_tokens == tokenizer.pad_token_id)[0]
+                            if len(pad_positions) > 0:
+                                first_pad_pos = pad_positions[0].item()
+                                actual_tokens = text_tokens[:first_pad_pos]
+                            else:
+                                actual_tokens = text_tokens
+                        else:
+                            actual_tokens = text_tokens
                         
-                        if len(eos_positions) > 0:
-                            # Look for the first position where we have consecutive eos tokens
-                            # The real content should end with a single eos, then padding starts
-                            content_end_pos = len(text_tokens)  # Default to full length
-                            
-                            for i in range(len(eos_positions) - 1):
-                                pos = eos_positions[i].item()
-                                next_pos = eos_positions[i + 1].item()
-                                
-                                # If two eos tokens are consecutive, the second one starts padding
-                                if next_pos == pos + 1:
-                                    content_end_pos = next_pos
-                                    break
-                            
-                            # If no consecutive eos found, check if the last tokens are all eos (padding)
-                            if content_end_pos == len(text_tokens):
-                                # Count consecutive eos tokens from the end
-                                consecutive_eos_from_end = 0
-                                for k in range(len(text_tokens) - 1, -1, -1):
-                                    if text_tokens[k] == tokenizer.eos_token_id:
-                                        consecutive_eos_from_end += 1
-                                    else:
-                                        break
-                                
-                                # If more than 1 consecutive eos at the end, assume padding
-                                if consecutive_eos_from_end > 1:
-                                    content_end_pos = len(text_tokens) - consecutive_eos_from_end + 1
-                            
-                            actual_tokens = text_tokens[:content_end_pos]
+                        token_texts = tokenizer.convert_ids_to_tokens(actual_tokens)
+                        all_tokens.append(token_texts)
+                        
+                        if len(all_tokens) <= 3 or len(all_tokens) % 50 == 0:
+                            print(f"Text {len(all_tokens)}: {len(token_texts)} tokens")
+                            print(f"  First 5: {token_texts[:5]}")
+                            print(f"  Last 5: {token_texts[-5:]}")
+                    
+                except RuntimeError as e:
+                    if "out of memory" in str(e):
+                        # If OOM occurs, try with even smaller batch
+                        print(f"\nOOM with batch size {actual_batch_size}, reducing...")
+                        if actual_batch_size > 1:
+                            actual_batch_size = max(1, actual_batch_size // 2)
+                            num_batches = (len(texts) + actual_batch_size - 1) // actual_batch_size
+                            # Clear memory and retry
+                            if torch.cuda.is_available():
+                                torch.cuda.empty_cache()
+                            continue
                         else:
-                            # No eos tokens found
-                            actual_tokens = text_tokens
-                            
-                    elif tokenizer.pad_token_id is not None:
-                        # Normal case: different pad and eos tokens
-                        pad_positions = torch.where(text_tokens == tokenizer.pad_token_id)[0]
-                        if len(pad_positions) > 0:
-                            first_pad_pos = pad_positions[0].item()
-                            actual_tokens = text_tokens[:first_pad_pos]
-                        else:
-                            actual_tokens = text_tokens
+                            raise  # If batch_size=1 still fails, we have a problem
                     else:
-                        # No pad token defined
-                        actual_tokens = text_tokens
-                    
-                    token_texts = tokenizer.convert_ids_to_tokens(actual_tokens)
-                    all_tokens.append(token_texts)
-                    
-                    # Debug print for first few examples
-                    if len(all_tokens) <= 3 or len(all_tokens) % 50 == 0:
-                        print(f"Text {len(all_tokens)}: {len(token_texts)} tokens")
-                        print(f"  First 5: {token_texts[:5]}")
-                        print(f"  Last 5: {token_texts[-5:]}")
-                        # Find EOS positions if any
-                        eos_positions = torch.where(text_tokens == tokenizer.eos_token_id)[0]
-                        if len(eos_positions) > 0:
-                            print(f"  EOS positions: {eos_positions.tolist()}")
-                            content_end_pos = eos_positions[0].item()
-                            print(f"  Content end position: {content_end_pos}")
-
-        # Since batches may have different padding lengths, we need to pad all to the same length
-        # Find the maximum sequence length across all batches
-        max_seq_len = 0
-        for layer in layers:
-            for batch_activations in all_activations[layer]:
-                max_seq_len = max(max_seq_len, batch_activations.shape[1])
+                        raise
+                
+                # Force garbage collection
+                import gc
+                gc.collect()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
         
+        # Since batches may have different padding lengths, we need to pad all to the same length
+        max_seq_len = max(batch.shape[1] for layer in layers for batch in all_activations[layer])
         print(f"Maximum sequence length across all batches: {max_seq_len}")
         
         # Pad all batches to the same length
+        final_activations = {}
         for layer in layers:
             padded_batches = []
             for batch_activations in all_activations[layer]:
                 batch_size, seq_len, hidden_size = batch_activations.shape
                 if seq_len < max_seq_len:
-                    # Pad with zeros - MAINTAIN DTYPE
                     padding = torch.zeros(
                         batch_size, max_seq_len - seq_len, hidden_size, 
                         dtype=batch_activations.dtype, device=batch_activations.device
@@ -215,15 +182,19 @@ class OptimizedBatchProbeEvaluator:
                 else:
                     padded_batch = batch_activations
                 padded_batches.append(padded_batch)
-            all_activations[layer] = padded_batches
+            
+            # Move back to GPU only when concatenating
+            final_activations[layer] = torch.cat([batch.to(self.device) for batch in padded_batches], dim=0)
+            
+            # Clear intermediate results
+            del padded_batches
+            del all_activations[layer]
         
-        # Concatenate all batches - MAINTAIN DTYPE
-        final_activations = {}
-        for layer in layers:
-            final_activations[layer] = torch.cat(all_activations[layer], dim=0)
-            print(f"Final activations for layer {layer}: {final_activations[layer].shape}, dtype: {final_activations[layer].dtype}")
+        # Clear more memory
+        del all_activations
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
         
-        # Cache results
         result = {
             'activations': final_activations,
             'tokens_by_text': all_tokens
