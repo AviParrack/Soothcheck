@@ -30,6 +30,7 @@ class OptimizedBatchProbeEvaluator:
     def __init__(self, model_name: str, device: str):
         self.device = device
         self.model_name = model_name
+        self.batch_size = 1  # Default batch size
         
         # Load model once
         print(f"Loading model {model_name}")

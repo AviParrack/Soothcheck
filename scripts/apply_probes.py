@@ -305,6 +305,8 @@ def main():
                       help="Path to probe file")
     parser.add_argument("--layer", type=int, required=True,
                       help="Layer number for the probe")
+    parser.add_argument("--batch_size", type=int, default=1,
+                      help="Batch size for processing (default: 1)")
     parser.add_argument("--output_dir", type=str, default="results/probe_evaluations",
                       help="Directory to save results")
     args = parser.parse_args()
@@ -314,6 +316,9 @@ def main():
         model_name=args.model_name,
         device=args.device if torch.cuda.is_available() else "cpu"
     )
+    
+    # Set batch size
+    evaluator.batch_size = args.batch_size
     
     # Load probes
     probe_configs = load_probes([args.probe_path])
