@@ -181,13 +181,8 @@ def compute_critical_scores(all_samples, data):
         if 'critical_analysis' not in item:
             continue
             
-        # Get token indices that are marked as critical
-        critical_indices = []
-        if 'critical_analysis' in item and isinstance(item['critical_analysis'], dict):
-            # Extract critical token indices from critical_analysis
-            # This might need adjustment based on exact format
-            critical_indices = item['critical_analysis'].get('critical_token_indices', [])
-        
+        # Get critical indices from the critical_analysis field
+        critical_indices = item['critical_analysis'].get('critical_indices', [])
         if not critical_indices:
             continue
             
@@ -197,7 +192,9 @@ def compute_critical_scores(all_samples, data):
             critical_scores.append({
                 'mean_score': float(sum(critical_token_scores) / len(critical_token_scores)),
                 'token_scores': critical_token_scores,
-                'indices': critical_indices
+                'indices': critical_indices,
+                'critical_claim': item['critical_analysis'].get('critical_claim', ''),
+                'user_query': item['critical_analysis'].get('user_query', '')
             })
         
     return critical_scores
@@ -352,6 +349,8 @@ def main():
         print("\nPer-sample critical token analysis:")
         for i, result in enumerate(critical_results):
             print(f"\nSample {i}:")
+            print(f"  User query: {result['user_query']}")
+            print(f"  Critical claim: {result['critical_claim']}")
             print(f"  Critical token count: {len(result['indices'])}")
             print(f"  Mean critical score: {result['mean_score']:.4f}")
             print(f"  Score range: {min(result['token_scores']):.4f} - {max(result['token_scores']):.4f}")
