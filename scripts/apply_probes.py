@@ -194,6 +194,8 @@ def main():
                       help="Number of samples to process (default: all)")
     parser.add_argument("--threshold", type=float, default=None,
                       help="Classification threshold (default: auto-computed from score distribution)")
+    parser.add_argument("--debug", action="store_true",
+                      help="Enable detailed debug output")
     
     args = parser.parse_args()
     
@@ -211,23 +213,27 @@ def main():
     print(f"Loaded {len(data)} samples")
     
     # Extract conversations and convert labels
-    print("Extracting conversations and converting labels")
+    print("\n=== Label Processing ===")
     conversations = extract_conversations(data)
+    
+    # Print raw labels before conversion
+    print("\nRaw labels before conversion:")
+    for i, item in enumerate(data):
+        label = item.get('label', 'skip')
+        print(f"Sample {i}: {label}")
+    
     labels = [convert_label_to_binary(item.get('label', 'skip')) for item in data]
     
-    # Print raw label distribution before filtering
-    raw_label_counts = {}
-    for item in data:
-        label = str(item.get('label', 'skip')).lower().strip()
-        raw_label_counts[label] = raw_label_counts.get(label, 0) + 1
-    print("\nRaw label distribution:")
-    for label, count in raw_label_counts.items():
-        print(f"  {label}: {count}")
+    # Print converted labels
+    print("\nConverted binary labels:")
+    for i, (label, orig) in enumerate(zip(labels, data)):
+        print(f"Sample {i}: {orig.get('label', 'skip')} -> {label}")
     
     # Filter out skipped samples
     valid_indices = [i for i, label in enumerate(labels) if label != -1]
     if len(valid_indices) < len(labels):
         print(f"\nFiltered out {len(labels) - len(valid_indices)} samples with skip/unknown labels")
+        print("Removed indices:", [i for i in range(len(labels)) if i not in valid_indices])
         conversations = [conversations[i] for i in valid_indices]
         labels = [labels[i] for i in valid_indices]
         data = [data[i] for i in valid_indices]
@@ -237,14 +243,6 @@ def main():
     print(f"  Deceptive (1): {sum(labels)}")
     print(f"  Honest (0): {len(labels) - sum(labels)}")
     print(f"  Ratio deceptive/honest: {sum(labels)/(len(labels) - sum(labels)):.2f}")
-    
-    # Add debug print of first few samples and their labels
-    print("\nFirst 5 samples and their labels:")
-    for i in range(min(5, len(data))):
-        print(f"\nSample {i+1}:")
-        print(f"  Original label: {data[i].get('label', 'skip')}")
-        print(f"  Binary label: {labels[i]}")
-        print(f"  First 100 chars: {conversations[i][:100]}...")
     
     # Load probe
     print(f"\nInitializing probe from {args.probe_path}")
@@ -266,11 +264,43 @@ def main():
         probe_configs=probe_configs
     )
     
-    # Analyze score distribution and set threshold
+    # Analyze results in detail
+    print("\n=== Detailed Results Analysis ===")
     probe_key = (args.layer, probe.__class__.__name__)
+    all_samples = results[probe_key]['all_samples']
     mean_scores = results[probe_key]['mean_scores']
     
-    print("\nScore distribution:")
+    print("\nPer-sample analysis:")
+    honest_scores = []
+    deceptive_scores = []
+    
+    for i, (sample, label) in enumerate(zip(all_samples, labels)):
+        score = sample['mean_score']
+        if label == 1:
+            deceptive_scores.append(score)
+        else:
+            honest_scores.append(score)
+        
+        print(f"\nSample {i}:")
+        print(f"  True label: {label} ({'deceptive' if label == 1 else 'honest'})")
+        print(f"  Mean score: {score:.4f}")
+        print(f"  Text preview: {sample['text'][:100]}...")
+        print(f"  Token count: {len(sample['tokens'])}")
+        print(f"  Score range: {min(sample['token_scores']):.4f} - {max(sample['token_scores']):.4f}")
+    
+    print("\nScore distribution by class:")
+    if honest_scores:
+        print(f"  Honest (0) scores:")
+        print(f"    Min: {min(honest_scores):.4f}")
+        print(f"    Max: {max(honest_scores):.4f}")
+        print(f"    Mean: {sum(honest_scores)/len(honest_scores):.4f}")
+    if deceptive_scores:
+        print(f"  Deceptive (1) scores:")
+        print(f"    Min: {min(deceptive_scores):.4f}")
+        print(f"    Max: {max(deceptive_scores):.4f}")
+        print(f"    Mean: {sum(deceptive_scores)/len(deceptive_scores):.4f}")
+    
+    print("\nOverall score distribution:")
     print(f"  Min score: {min(mean_scores):.4f}")
     print(f"  Max score: {max(mean_scores):.4f}")
     print(f"  Mean score: {sum(mean_scores)/len(mean_scores):.4f}")
@@ -282,11 +312,14 @@ def main():
         max_gap = 0
         best_threshold = 0.5
         
+        print("\nGap analysis for threshold:")
         for i in range(len(sorted_scores) - 1):
             gap = sorted_scores[i + 1][0] - sorted_scores[i][0]
+            print(f"  Gap between {sorted_scores[i][0]:.4f} ({sorted_scores[i][1]}) and {sorted_scores[i+1][0]:.4f} ({sorted_scores[i+1][1]}): {gap:.4f}")
             if gap > max_gap:
                 max_gap = gap
                 best_threshold = (sorted_scores[i][0] + sorted_scores[i + 1][0]) / 2
+                print(f"    New best threshold: {best_threshold:.4f}")
         
         threshold = best_threshold
         print(f"\nAuto-computed threshold: {threshold:.4f}")
@@ -296,6 +329,17 @@ def main():
     
     # Recalculate metrics with new threshold
     predictions = [1 if score > threshold else 0 for score in mean_scores]
+    
+    print("\nConfusion matrix:")
+    tp = sum(1 for p, l in zip(predictions, labels) if p == 1 and l == 1)
+    fp = sum(1 for p, l in zip(predictions, labels) if p == 1 and l == 0)
+    fn = sum(1 for p, l in zip(predictions, labels) if p == 0 and l == 1)
+    tn = sum(1 for p, l in zip(predictions, labels) if p == 0 and l == 0)
+    print(f"  True Positives (deceptive correctly identified): {tp}")
+    print(f"  False Positives (honest misclassified as deceptive): {fp}")
+    print(f"  False Negatives (deceptive misclassified as honest): {fn}")
+    print(f"  True Negatives (honest correctly identified): {tn}")
+    
     metrics = {
         'accuracy': float(accuracy_score(labels, predictions)),
         'precision': float(precision_score(labels, predictions)),
@@ -314,7 +358,7 @@ def main():
     # Add scores to data
     print("\nAdding scores to data")
     probe_name = Path(args.probe_path).stem
-    for item, score_list in zip(data, results[probe_key]['all_samples']):
+    for item, score_list in zip(data, all_samples):
         item['token_scores'] = score_list['token_scores']
         item['probe_name'] = probe_name
         item['layer'] = args.layer
