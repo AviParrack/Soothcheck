@@ -112,13 +112,26 @@ class OptimizedBatchProbeEvaluator:
                 
                 batch_texts = texts[i:i + actual_batch_size]
                 
-                # Tokenize batch
+                # Apply chat template to match old pipeline tokenization
+                formatted_texts = []
+                for text in batch_texts:
+                    # Parse the conversation format and apply chat template
+                    messages = self._parse_conversation_to_messages(text)
+                    # Apply chat template to get proper Llama formatting
+                    formatted_text = self.tokenizer.apply_chat_template(
+                        messages, 
+                        tokenize=False,
+                        add_generation_prompt=False
+                    )
+                    formatted_texts.append(formatted_text)
+                
+                # Tokenize with chat template applied (matches old pipeline)
                 tokens = self.tokenizer(
-                    batch_texts, 
+                    formatted_texts, 
                     return_tensors="pt", 
                     padding=True,
                     truncation=True,
-                    add_special_tokens=False
+                    add_special_tokens=False  # Chat template already adds them
                 ).to(self.device)
                 
                 try:
