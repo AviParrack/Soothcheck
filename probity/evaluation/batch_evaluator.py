@@ -763,77 +763,103 @@ class HuggingFaceProbeEvaluator:
         results = {}
         
         for (layer_idx, probe_name), probe in probe_configs.items():
-            print(f"\nEvaluating probe {probe_name} on layer {layer_idx}")
-            
-            all_samples = []
-            mean_scores = []
+            print(f"Processing probe: {probe_name} at layer {layer_idx}")
+            all_scores = []
             
             for i, (text, label) in enumerate(zip(texts, labels)):
-                if not text.strip():  # Skip empty texts
-                    continue
-                    
                 print(f"Processing sample {i+1}/{len(texts)}")
                 
                 try:
-                    # Tokenize to get tokens and find position indices
+                    # Debug tokenization to understand the count difference
+                    if i == 0:  # Only debug first sample
+                        print(f"\\nDEBUG - Text length: {len(text)} characters")
+                        print(f"DEBUG - Text preview: {text[:200]}...")
+                        
+                        # Test different tokenization approaches
+                        tokens_1 = self.tokenizer.encode(text, add_special_tokens=False)
+                        tokens_2 = self.tokenizer.encode(text, add_special_tokens=True)
+                        tokens_3 = self.tokenizer(text, return_tensors="pt", add_special_tokens=False)["input_ids"][0]
+                        
+                        print(f"DEBUG - Tokens (no special): {len(tokens_1)}")
+                        print(f"DEBUG - Tokens (with special): {len(tokens_2)}")
+                        print(f"DEBUG - Tokens (tokenizer call): {len(tokens_3)}")
+                        
+                        # Check if there are any differences
+                        if len(tokens_1) != len(tokens_3):
+                            print(f"WARNING: Different tokenization results!")
+                            print(f"encode(): {tokens_1[:10]}...")
+                            print(f"tokenizer(): {tokens_3[:10]}...")
+                    
+                    # Use the standard approach
                     tokens = self.tokenizer.encode(text, add_special_tokens=False)
+                    token_strings = [self.tokenizer.decode([token_id]) for token_id in tokens]
                     
-                    # Use the standard HuggingFace tokenizer decode - this should handle SentencePiece properly
-                    token_strings = []
-                    for token_id in tokens:
-                        token_str = self.tokenizer.decode([token_id], skip_special_tokens=False)
-                        token_strings.append(token_str)
+                    # Get activations from the model
+                    input_ids = torch.tensor([tokens]).to(self.device)
                     
-                    # Get activations for all positions
-                    activations = self.get_layer_activations(text, layer_idx, position_idx=None)  # Get all positions
-                    
-                    # Apply probe to all positions
-                    token_scores = []
                     with torch.no_grad():
-                        for pos in range(activations.shape[1]):
-                            pos_activation = activations[:, pos, :]  # [batch_size, hidden_dim]
-                            probe_output = probe(pos_activation)
+                        # Extract activations using forward hooks
+                        activations = {}
+                        
+                        def hook_fn(name):
+                            def hook(module, input, output):
+                                activations[name] = output.detach()
+                            return hook
+                        
+                        # Register hook for the target layer
+                        target_layer = self.model.model.layers[layer_idx]
+                        hook_handle = target_layer.register_forward_hook(hook_fn(f"layer_{layer_idx}"))
+                        
+                        # Forward pass
+                        _ = self.model(input_ids)
+                        
+                        # Remove hook
+                        hook_handle.remove()
+                        
+                        # Get the layer activations
+                        layer_activations = activations[f"layer_{layer_idx}"]  # Shape: [batch, seq_len, hidden_dim]
+                        
+                        # For each token position, apply the probe
+                        token_scores = []
+                        for pos in range(layer_activations.shape[1]):
+                            activation_vector = layer_activations[0, pos, :].cpu().numpy()  # [hidden_dim]
                             
-                            # Convert to probability/score
-                            if probe_output.dim() == 2 and probe_output.shape[1] == 1:
-                                score = torch.sigmoid(probe_output).item()
+                            # Apply probe
+                            if hasattr(probe, 'predict_proba'):
+                                score = probe.predict_proba([activation_vector])[0][1]  # Get probability of class 1
                             else:
-                                score = torch.softmax(probe_output, dim=-1).max().item()
+                                score = probe.predict([activation_vector])[0]
                             
-                            token_scores.append(score)
-                    
-                    # Calculate mean score
-                    mean_score = np.mean(token_scores)
-                    
-                    sample_result = {
-                        'text': text,
-                        'tokens': token_strings,
-                        'token_scores': token_scores,
-                        'mean_score': mean_score,
-                        'label': label
-                    }
-                    
-                    all_samples.append(sample_result)
-                    mean_scores.append(mean_score)
-                    
-                    print(f"  Sample {i+1}: mean_score={mean_score:.4f}, tokens={len(token_strings)}")
-                    
+                            token_scores.append({
+                                'position': pos,
+                                'token': token_strings[pos] if pos < len(token_strings) else '<PAD>',
+                                'score': float(score)
+                            })
+                        
+                        # Store the result for this sample
+                        sample_result = {
+                            'text': text,
+                            'label': label,
+                            'token_count': len(tokens),
+                            'token_scores': token_scores,
+                            'mean_score': np.mean([s['score'] for s in token_scores])
+                        }
+                        
+                        all_scores.append(sample_result)
+                        
+                        print(f"  Token count: {len(tokens)}, Mean score: {sample_result['mean_score']:.4f}")
+                        
                 except Exception as e:
-                    print(f"  Error processing sample {i+1}: {e}")
-                    # Add empty result to maintain alignment
-                    sample_result = {
-                        'text': text,
-                        'tokens': [],
-                        'token_scores': [],
-                        'mean_score': 0.0,
-                        'label': label
-                    }
-                    all_samples.append(sample_result)
-                    mean_scores.append(0.0)
+                    print(f"Error processing sample {i}: {e}")
+                    continue
             
-            results[(layer_idx, probe_name)] = {
-                'all_samples': all_samples,
-                'mean_scores': mean_scores
-            }
-        
+            # Aggregate results for this probe
+            if all_scores:
+                mean_score = np.mean([s['mean_score'] for s in all_scores])
+                results[(layer_idx, probe_name)] = {
+                    'all_samples': all_scores,
+                    'mean_scores': mean_score
+                }
+                print(f"Probe {probe_name} at layer {layer_idx}: Mean score = {mean_score:.4f}")
+            
         return results
