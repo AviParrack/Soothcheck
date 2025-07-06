@@ -121,6 +121,15 @@ class OptimizedBatchProbeEvaluator:
                     # Save previous message if exists
                     if current_role is not None and current_content:
                         content = '\n'.join(current_content).strip()
+                        
+                        # Fix system message duplication: remove chat template prefix if present
+                        if current_role == 'system':
+                            # Remove the automatic prefix that chat template adds
+                            prefix_to_remove = "Cutting Knowledge Date: December 2023\nToday Date: 26 Jul 2024\n\n"
+                            if content.startswith(prefix_to_remove):
+                                content = content[len(prefix_to_remove):]
+                                print(f"DEBUG: Removed duplicate chat template prefix from system message")
+                        
                         messages.append({
                             "role": current_role,
                             "content": content
@@ -140,6 +149,15 @@ class OptimizedBatchProbeEvaluator:
         # Add final message
         if current_role is not None and current_content:
             content = '\n'.join(current_content).strip()
+            
+            # Fix system message duplication: remove chat template prefix if present
+            if current_role == 'system':
+                # Remove the automatic prefix that chat template adds
+                prefix_to_remove = "Cutting Knowledge Date: December 2023\nToday Date: 26 Jul 2024\n\n"
+                if content.startswith(prefix_to_remove):
+                    content = content[len(prefix_to_remove):]
+                    print(f"DEBUG: Removed duplicate chat template prefix from final system message")
+            
             messages.append({
                 "role": current_role,
                 "content": content
