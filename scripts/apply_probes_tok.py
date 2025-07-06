@@ -45,13 +45,50 @@ def load_jsonl_streaming(file_path: str, num_samples: Optional[int] = None):
             yield json.loads(line)
             count += 1
 
-def extract_token_lists(sample_data: Dict) -> Dict[str, List[int]]:
-    """Extract token lists from sample data."""
+def convert_label_to_binary(label: str) -> int:
+    """Convert string label to binary (0/1) or -1 for skip."""
+    if label.lower() in ['deceptive', 'lie', 'lying', 'dishonest']:
+        return 1
+    elif label.lower() in ['honest', 'truth', 'truthful']:
+        return 0
+    else:
+        return -1  # Skip unknown labels
+
+def save_sample_result(output_file: str, sample_data: Dict, mode: str = 'a'):
+    """Save sample result to file."""
+    with open(output_file, mode) as f:
+        f.write(json.dumps(sample_data) + '\n')
+        f.flush()  # Ensure immediate write to disk
+
+def extract_token_lists(sample_data: Dict, tokenizer=None) -> Dict[str, List[int]]:
+    """Extract token lists from sample data.
+    
+    Based on the JSON structure, tokens are in the 'tokens' field of each conversation branch,
+    not in 'token_lists' which contains probe-specific token lists.
+    """
     token_lists = {}
     for branch_name, branch_data in sample_data.get('conversations', {}).items():
-        if 'token_lists' in branch_data:
+        # First try to get tokens from existing token_lists (if already processed)
+        if 'token_lists' in branch_data and branch_data['token_lists']:
+            # Get first available token list
             first_probe = next(iter(branch_data['token_lists'].values()))
             token_lists[branch_name] = first_probe
+        # Otherwise get from the 'tokens' field (original tokenization)
+        elif 'tokens' in branch_data:
+            tokens = branch_data['tokens']
+            if isinstance(tokens[0], str):
+                # Convert token strings to token IDs using tokenizer
+                if tokenizer is None:
+                    print(f"Warning: Found string tokens in {branch_name} but no tokenizer provided")
+                    continue
+                token_ids = tokenizer.convert_tokens_to_ids(tokens)
+                token_lists[branch_name] = token_ids
+            else:
+                # Assume they're already token IDs
+                token_lists[branch_name] = tokens
+        else:
+            print(f"Warning: No tokens found in branch {branch_name}")
+            continue
     return token_lists
 
 def process_sample_streaming(
@@ -64,7 +101,21 @@ def process_sample_streaming(
 ) -> bool:
     """Process a single sample using streaming to avoid memory issues."""
     try:
-        token_lists = extract_token_lists(sample_data)
+        # Extract conversations from this single sample
+        conversations = sample_data.get('conversations', {})
+        if not conversations:
+            print(f"Sample {sample_idx}: No conversations found, skipping")
+            return False
+
+        # Convert label using the same logic as original
+        label = convert_label_to_binary(sample_data.get('metadata', {}).get('label', 'skip'))
+        if label == -1:
+            print(f"Sample {sample_idx}: Skip/unknown label, skipping")
+            return False
+
+        print(f"Sample {sample_idx}: Label = {label} ({'deceptive' if label == 1 else 'honest'})")
+
+        token_lists = extract_token_lists(sample_data, evaluator.tokenizer)
         if not token_lists:
             print(f"No token lists found in sample {sample_idx}")
             return False
@@ -75,8 +126,13 @@ def process_sample_streaming(
             print(f"\nProcessing branch: {branch_name}")
             print(f"Token count: {len(tokens)}")
             
-            label = 1 if 'deception' in branch_name.lower() else 0
+            # Use the main label for all branches (same as original script)
             print(f"Label: {label} ({'deceptive' if label else 'honest'})")
+            
+            # Clear GPU memory before processing
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            gc.collect()
             
             probe_configs = {(layer, probe.__class__.__name__): probe}
             results = evaluator.evaluate_all_probes_from_tokens(
@@ -90,11 +146,13 @@ def process_sample_streaming(
             sample_result = results[probe_key]['all_samples'][0]
             probe_name = f"layer_{layer}_{probe.__class__.__name__}"
             
+            # Initialize structures if needed (same as original)
             if 'conversations' not in sample_data:
                 sample_data['conversations'] = {}
             if branch_name not in sample_data['conversations']:
                 sample_data['conversations'][branch_name] = {}
             
+            # Add probe results (same format as original)
             if 'available_probes' not in sample_data['conversations'][branch_name]:
                 sample_data['conversations'][branch_name]['available_probes'] = []
             if probe_name not in sample_data['conversations'][branch_name]['available_probes']:
@@ -104,15 +162,38 @@ def process_sample_streaming(
                 sample_data['conversations'][branch_name]['probe_scores'] = {}
             sample_data['conversations'][branch_name]['probe_scores'][probe_name] = sample_result['token_scores']
             
+            if 'token_lists' not in sample_data['conversations'][branch_name]:
+                sample_data['conversations'][branch_name]['token_lists'] = {}
+            sample_data['conversations'][branch_name]['token_lists'][probe_name] = sample_result['tokens']
+            
             print(f"Branch {branch_name}: Added {len(sample_result['token_scores'])} token scores")
+            print(f"Mean score: {sample_result['mean_score']:.4f}")
             
-        with open(output_file, 'a') as f:
-            f.write(json.dumps(sample_data) + '\n')
-            
+            # Aggressive cleanup after each branch (same as original)
+            del results, sample_result
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            gc.collect()
+        
+        # Save this sample immediately (same as original)
+        mode = 'w' if sample_idx == 0 else 'a'
+        save_sample_result(output_file, sample_data, mode)
+        print(f"Sample {sample_idx}: Saved to {output_file}")
+        
+        # Final cleanup (same as original)
+        del sample_data
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        gc.collect()
+        
         return True
         
     except Exception as e:
-        print(f"Error processing sample {sample_idx}: {e}")
+        print(f"ERROR processing sample {sample_idx}: {e}")
+        # Emergency cleanup (same as original)
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        gc.collect()
         return False
 
 def process_file(
