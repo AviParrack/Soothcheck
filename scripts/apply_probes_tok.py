@@ -120,14 +120,16 @@ def process_sample_streaming(
             print(f"No token lists found in sample {sample_idx}")
             return False
             
-        print(f"Found {len(token_lists)} conversation branches")
+        # Compact output - just show branch count
+        branch_count = len(token_lists)
+        total_tokens = sum(len(tokens) for tokens in token_lists.values())
+        print(f"Processing {branch_count} branches, {total_tokens} total tokens")
         
         for branch_name, tokens in token_lists.items():
-            print(f"\nProcessing branch: {branch_name}")
-            print(f"Token count: {len(tokens)}")
+            # Compact branch processing output
+            print(f"  {branch_name}: {len(tokens)} tokens", end=" -> ")
             
             # Use the main label for all branches (same as original script)
-            print(f"Label: {label} ({'deceptive' if label else 'honest'})")
             
             # Clear GPU memory before processing
             if torch.cuda.is_available():
@@ -166,8 +168,16 @@ def process_sample_streaming(
                 sample_data['conversations'][branch_name]['token_lists'] = {}
             sample_data['conversations'][branch_name]['token_lists'][probe_name] = sample_result['tokens']
             
-            print(f"Branch {branch_name}: Added {len(sample_result['token_scores'])} token scores")
-            print(f"Mean score: {sample_result['mean_score']:.4f}")
+            # Add human-readable token strings for verification
+            if 'token_strings' not in sample_data['conversations'][branch_name]:
+                sample_data['conversations'][branch_name]['token_strings'] = {}
+            # Convert token IDs back to strings for verification
+            token_strings = evaluator.tokenizer.convert_ids_to_tokens(sample_result['tokens'])
+            sample_data['conversations'][branch_name]['token_strings'][probe_name] = token_strings
+            
+            # Compact output - just show mean score and token verification
+            mean_score = sample_result['mean_score']
+            print(f"score={mean_score:.3f}, tokens=[{token_strings[0]}...{token_strings[-1]}]")
             
             # Aggressive cleanup after each branch (same as original)
             del results, sample_result
@@ -229,14 +239,20 @@ def process_file(
     print(f"Total samples to process: {total_samples}")
     print(f"Starting from sample: {resume_from}")
     
+    # Create progress bar for this file
+    pbar = tqdm(total=total_samples - resume_from, 
+                desc=f"Processing {Path(input_file).name}", 
+                unit="samples",
+                position=0,
+                leave=True)
+    
     # Process samples
     for sample_idx, sample_data in enumerate(load_jsonl_streaming(input_file, num_samples)):
         if sample_idx < resume_from:
             continue
             
-        print(f"\n{'='*60}")
-        print(f"PROCESSING SAMPLE {sample_idx + 1}/{total_samples}")
-        print(f"{'='*60}")
+        # Update progress bar description with current sample
+        pbar.set_description(f"Processing {Path(input_file).name} - Sample {sample_idx + 1}")
         
         success = process_sample_streaming(
             sample_data=sample_data,
@@ -251,18 +267,19 @@ def process_file(
         if success:
             successful_count += 1
         
-        print(f"\nProgress: {processed_count}/{total_samples - resume_from} processed, {successful_count} successful")
-        
-        if torch.cuda.is_available():
-            memory_allocated = torch.cuda.memory_allocated() / 1024**3
-            memory_reserved = torch.cuda.memory_reserved() / 1024**3
-            print(f"GPU Memory: {memory_allocated:.2f}GB allocated, {memory_reserved:.2f}GB reserved")
+        # Update progress bar
+        pbar.update(1)
+        pbar.set_postfix({
+            'Success': f"{successful_count}/{processed_count}",
+            'GPU_GB': f"{torch.cuda.memory_allocated() / 1024**3:.1f}" if torch.cuda.is_available() else "N/A"
+        })
         
         if torch.cuda.is_available() and torch.cuda.memory_allocated() > 60 * 1024**3:  # 60GB threshold
-            print("WARNING: High GPU memory usage detected, forcing cleanup...")
+            print("\nWARNING: High GPU memory usage detected, forcing cleanup...")
             torch.cuda.empty_cache()
             gc.collect()
     
+    pbar.close()
     return processed_count, successful_count
 
 def parse_args():
@@ -314,8 +331,17 @@ def main():
     total_processed = 0
     total_successful = 0
     
-    for input_file in input_files:
+    # Create overall progress bar for all files
+    overall_pbar = tqdm(total=len(input_files), 
+                       desc="Processing files", 
+                       unit="files",
+                       position=1,
+                       leave=True)
+    
+    for file_idx, input_file in enumerate(input_files):
         output_file = output_dir / f"{input_file.stem}_tok.jsonl"
+        
+        overall_pbar.set_description(f"File {file_idx + 1}/{len(input_files)}: {input_file.name}")
         
         processed, successful = process_file(
             input_file=str(input_file),
@@ -330,11 +356,15 @@ def main():
         total_processed += processed
         total_successful += successful
         
-        print(f"\nCompleted {input_file.name}:")
-        print(f"Processed: {processed}")
-        print(f"Successful: {successful}")
-        print(f"Failed: {processed - successful}")
-        print(f"Output saved to: {output_file}")
+        overall_pbar.update(1)
+        overall_pbar.set_postfix({
+            'Total_Success': f"{total_successful}/{total_processed}",
+            'Current_File': f"{successful}/{processed}"
+        })
+        
+        print(f"\nCompleted {input_file.name}: {successful}/{processed} successful")
+    
+    overall_pbar.close()
     
     print(f"\n{'='*60}")
     print(f"ALL FILES PROCESSED")
@@ -343,6 +373,7 @@ def main():
     print(f"Total samples processed: {total_processed}")
     print(f"Total successful: {total_successful}")
     print(f"Total failed: {total_processed - total_successful}")
+    print(f"Success rate: {total_successful/total_processed*100:.1f}%")
 
 if __name__ == "__main__":
     main() 
