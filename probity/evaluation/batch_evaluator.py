@@ -86,142 +86,12 @@ class OptimizedBatchProbeEvaluator:
         # Cache for activations
         self._activation_cache = {}
         
-    def _parse_conversation_to_messages(self, conversation_text: str) -> List[Dict[str, str]]:
-        """Parse conversation format into messages for chat template"""
-        print(f"DEBUG: _parse_conversation_to_messages called")
-        print(f"DEBUG: Input conversation_text length: {len(conversation_text)}")
-        print(f"DEBUG: First 500 chars: {repr(conversation_text[:500])}")
-        
-        # Clean malformed characters FIRST
-        cleaned_conversation = conversation_text.replace('Ċ', '\n')
-        
-        # Count cleaning
-        original_c_count = conversation_text.count('Ċ')
-        print(f"DEBUG: Cleaned {original_c_count} 'Ċ' characters to newlines")
-        
-        # Parse the cleaned text into messages
-        messages = []
-        current_role = None
-        current_content = []
-        
-        lines = cleaned_conversation.strip().split('\n')
-        print(f"DEBUG: Split into {len(lines)} lines")
-        
-        for i, line in enumerate(lines):
-            line = line.strip()
-            if not line:
-                continue
-                
-            # Check if this is a role line (system:, user:, assistant:)
-            if ':' in line:
-                role_part = line.split(':', 1)[0].strip()
-                if role_part in ['system', 'user', 'assistant']:
-                    print(f"DEBUG: Found role line {i}: {role_part}")
-                    
-                    # Save previous message if exists
-                    if current_role is not None and current_content:
-                        content = '\n'.join(current_content).strip()
-                        
-                        # Fix system message duplication: remove chat template prefix if present
-                        if current_role == 'system':
-                            # Remove the automatic prefix that chat template adds
-                            prefix_to_remove = "Cutting Knowledge Date: December 2023\nToday Date: 26 Jul 2024\n\n"
-                            if content.startswith(prefix_to_remove):
-                                content = content[len(prefix_to_remove):]
-                                print(f"DEBUG: Removed duplicate chat template prefix from system message")
-                        
-                        messages.append({
-                            "role": current_role,
-                            "content": content
-                        })
-                        print(f"DEBUG: Saved {current_role} message with {len(content)} chars")
-                    
-                    # Start new message
-                    current_role = role_part
-                    content_part = line.split(':', 1)[1].strip()
-                    current_content = [content_part] if content_part else []
-                    continue
-            
-            # Add to current message content
-            if current_role is not None:
-                current_content.append(line)
-        
-        # Add final message
-        if current_role is not None and current_content:
-            content = '\n'.join(current_content).strip()
-            
-            # Fix system message duplication: remove chat template prefix if present
-            if current_role == 'system':
-                # Remove the automatic prefix that chat template adds
-                prefix_to_remove = "Cutting Knowledge Date: December 2023\nToday Date: 26 Jul 2024\n\n"
-                if content.startswith(prefix_to_remove):
-                    content = content[len(prefix_to_remove):]
-                    print(f"DEBUG: Removed duplicate chat template prefix from final system message")
-            
-            messages.append({
-                "role": current_role,
-                "content": content
-            })
-            print(f"DEBUG: Saved final {current_role} message with {len(content)} chars")
-        
-        print(f"DEBUG: Parsed {len(messages)} messages:")
-        for i, msg in enumerate(messages):
-            print(f"  Message {i}: role={msg['role']}, content_len={len(msg['content'])}")
-            print(f"    Content preview: {repr(msg['content'][:100])}")
-        
-        return messages
-        
-    def _reconstruct_original_format(self, conversation_text: str) -> str:
-        """Use LLaMA chat template to format conversation properly"""
-        print(f"DEBUG: _reconstruct_original_format called")
-        print(f"DEBUG: Input text length: {len(conversation_text)}")
-        
-        # Parse the conversation into messages
-        messages = self._parse_conversation_to_messages(conversation_text)
-        
-        if not messages:
-            print("WARNING: No messages parsed from conversation")
-            return conversation_text
-        
-        print(f"DEBUG: Applying chat template to {len(messages)} messages")
-        
-        # Apply the LLaMA chat template
-        try:
-            formatted_text = self.tokenizer.apply_chat_template(
-                messages,
-                tokenize=False,
-                add_generation_prompt=False
-            )
-            print(f"DEBUG: Chat template applied successfully")
-            print(f"DEBUG: Formatted text length: {len(formatted_text)}")
-            print(f"DEBUG: First 500 chars: {repr(formatted_text[:500])}")
-            print(f"DEBUG: Last 500 chars: {repr(formatted_text[-500:])}")
-            
-            return formatted_text
-            
-        except Exception as e:
-            print(f"ERROR: Chat template failed: {e}")
-            print(f"DEBUG: Messages that failed:")
-            for i, msg in enumerate(messages):
-                print(f"  Message {i}: {msg}")
-            
-            # Fallback to simple concatenation
-            result = ""
-            for msg in messages:
-                result += f"{msg['role']}: {msg['content']}\n"
-            return result.strip()
-        
-    def get_batch_activations(self, texts: List[str], layers: List[int], 
+    def get_batch_activations(self, messages_list: List[List[Dict[str, str]]], layers: List[int], 
                             batch_size: int = 1) -> Dict[int, torch.Tensor]:
-        """Get activations for all texts and layers efficiently using HuggingFace model"""
+        """Get activations for all message lists and layers efficiently using HuggingFace model"""
         
-        # TEMPORARILY DISABLE CACHING FOR DEBUGGING
-        # Create cache key
-        # cache_key = (tuple(sorted(texts)), tuple(sorted(layers)))
-        # if cache_key in self._activation_cache:
-        #     return self._activation_cache[cache_key]
-        
-        print("DEBUG: Caching disabled - processing fresh")
+        print("DEBUG: get_batch_activations called with message lists")
+        print(f"DEBUG: Processing {len(messages_list)} conversations")
         
         # Process in smaller batches with memory cleanup
         all_activations = {layer: [] for layer in layers}
@@ -229,29 +99,51 @@ class OptimizedBatchProbeEvaluator:
         
         # Start with minimal batch size
         actual_batch_size = 1
-        num_batches = (len(texts) + actual_batch_size - 1) // actual_batch_size
+        num_batches = (len(messages_list) + actual_batch_size - 1) // actual_batch_size
         
         with torch.no_grad():
-            for i in tqdm(range(0, len(texts), actual_batch_size), total=num_batches, desc="Processing batches"):
+            for i in tqdm(range(0, len(messages_list), actual_batch_size), total=num_batches, desc="Processing batches"):
                 # Aggressive memory cleanup before each batch
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
                 gc.collect()
                 
-                batch_texts = texts[i:i + actual_batch_size]
+                batch_messages = messages_list[i:i + actual_batch_size]
                 
-                # Reconstruct exact original formatting (no chat template)
+                # Apply chat template directly to message lists
                 formatted_texts = []
-                for idx, text in enumerate(batch_texts):
+                for idx, messages in enumerate(batch_messages):
                     print(f"DEBUG: Processing sample {idx}")
-                    print(f"DEBUG: Sample {idx} first 200 chars: {repr(text[:200])}")
+                    print(f"DEBUG: Sample {idx} has {len(messages)} messages")
                     
-                    # Reconstruct the original Llama format manually
-                    # Character cleaning now happens inside _parse_conversation_to_messages
-                    formatted_text = self._reconstruct_original_format(text)
-                    formatted_texts.append(formatted_text)
+                    if not messages:  # Skip empty message lists
+                        formatted_texts.append("")
+                        continue
+                    
+                    # Apply chat template directly to the message structure
+                    try:
+                        formatted_text = self.tokenizer.apply_chat_template(
+                            messages,
+                            tokenize=False,
+                            add_generation_prompt=False
+                        )
+                        print(f"DEBUG: Chat template applied successfully to sample {idx}")
+                        print(f"DEBUG: Sample {idx} formatted length: {len(formatted_text)}")
+                        print(f"DEBUG: Sample {idx} first 200 chars: {repr(formatted_text[:200])}")
+                        
+                        formatted_texts.append(formatted_text)
+                        
+                    except Exception as e:
+                        print(f"ERROR: Chat template failed for sample {idx}: {e}")
+                        print(f"DEBUG: Messages that failed: {messages}")
+                        
+                        # Fallback to simple concatenation
+                        fallback_text = ""
+                        for msg in messages:
+                            fallback_text += f"{msg['role']}: {msg['content']}\n"
+                        formatted_texts.append(fallback_text.strip())
                 
-                # Tokenize with chat template applied (matches old pipeline)
+                # Tokenize with chat template applied
                 tokens = self.tokenizer(
                     formatted_texts, 
                     return_tensors="pt", 
@@ -268,7 +160,7 @@ class OptimizedBatchProbeEvaluator:
                         output_hidden_states=True,
                         return_dict=True
                     )
-                    
+                
                     # Extract hidden states for each requested layer
                     hidden_states = outputs.hidden_states  # Tuple of (batch, seq_len, hidden_size)
                     
@@ -285,7 +177,7 @@ class OptimizedBatchProbeEvaluator:
                     gc.collect()
                     
                     # Store tokens
-                    for j, text in enumerate(batch_texts):
+                    for j, messages in enumerate(batch_messages):
                         text_tokens = tokens["input_ids"][j]
                         if self.tokenizer.pad_token_id is not None:
                             pad_positions = torch.where(text_tokens == self.tokenizer.pad_token_id)[0]
@@ -374,11 +266,10 @@ class OptimizedBatchProbeEvaluator:
             'activations': final_activations,
             'tokens_by_text': all_tokens
         }
-        # self._activation_cache[cache_key] = result
         
         return result
     
-    def evaluate_all_probes(self, texts: List[str], labels: List[int], 
+    def evaluate_all_probes(self, messages_list: List[List[Dict[str, str]]], labels: List[int], 
                           probe_configs: Dict[Tuple[int, str], BaseProbe]) -> Dict[Tuple[int, str], Dict]:
         """Evaluate all probes efficiently using cached activations"""
         
@@ -387,7 +278,7 @@ class OptimizedBatchProbeEvaluator:
         
         # Get activations for all required layers at once
         print("Getting activations for all layers...")
-        activation_data = self.get_batch_activations(texts, layers)
+        activation_data = self.get_batch_activations(messages_list, layers)
         activations = activation_data['activations']
         tokens_by_text = activation_data['tokens_by_text']
         
@@ -415,7 +306,7 @@ class OptimizedBatchProbeEvaluator:
                 # Get probe scores efficiently
                 probe_results = self._evaluate_single_probe_batch(
                     probe, layer_activations, mean_activations, 
-                    texts, labels, tokens_by_text
+                    messages_list, labels, tokens_by_text
                 )
                 
                 results[(layer, probe_type)] = probe_results
@@ -427,7 +318,7 @@ class OptimizedBatchProbeEvaluator:
     def _evaluate_single_probe_batch(self, probe: BaseProbe, 
                                    layer_activations: torch.Tensor,
                                    mean_activations: torch.Tensor,
-                                   texts: List[str], labels: List[int],
+                                   messages_list: List[List[Dict[str, str]]], labels: List[int],
                                    tokens_by_text: List[List[str]]) -> Dict:
         """Evaluate a single probe on batch data"""
         
@@ -446,7 +337,7 @@ class OptimizedBatchProbeEvaluator:
         all_samples = []
         
         with torch.no_grad():
-            for i, (text, true_label) in tqdm(enumerate(zip(texts, labels)), total=len(texts), desc="Processing texts"):
+            for i, (messages, true_label) in tqdm(enumerate(zip(messages_list, labels)), total=len(messages_list), desc="Processing texts"):
                 # Clear memory before each sample
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
@@ -492,7 +383,7 @@ class OptimizedBatchProbeEvaluator:
                 
                 sample_info = {
                     "idx": i,
-                    "text": text,
+                    "messages": messages,
                     "true_label": true_label,
                     "tokens": tokens,
                     "raw_token_scores": token_scores_list
@@ -532,7 +423,7 @@ class OptimizedBatchProbeEvaluator:
             
             sample_info = {
                 "sample_id": sample["idx"],
-                "text": sample["text"],
+                "messages": sample["messages"],
                 "true_label": int(sample["true_label"]),
                 "tokens": sample["tokens"],
                 "token_scores": sample["token_scores"],
@@ -573,7 +464,7 @@ class OptimizedBatchProbeEvaluator:
             clean_tokens = [token.replace('Ġ', ' ').replace('Ċ', '\n') for token in sample["tokens"]]
             
             token_detail = {
-                "text": sample["text"],
+                "messages": sample["messages"],
                 "label": int(sample["true_label"]),
                 "tokens": clean_tokens,
                 "token_scores": sample["token_scores"],

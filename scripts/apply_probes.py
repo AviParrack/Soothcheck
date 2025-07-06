@@ -38,14 +38,14 @@ def save_jsonl(data: List[Dict], file_path: str):
         for item in data:
             f.write(json.dumps(item) + '\n')
 
-def extract_conversations(data: List[Dict]) -> List[Dict[str, str]]:
+def extract_conversations(data: List[Dict]) -> List[Dict[str, List[Dict]]]:
     """Extract all conversations from B2W data format.
     
     Args:
         data: List of data items
         
     Returns:
-        List of dictionaries mapping conversation branch names to their text content
+        List of dictionaries mapping conversation branch names to their message lists
     """
     print("DEBUG: extract_conversations() called")
     print(f"DEBUG: Processing {len(data)} data items")
@@ -74,24 +74,13 @@ def extract_conversations(data: List[Dict]) -> List[Dict[str, str]]:
             messages = branch_data.get('messages', [])
             print(f"DEBUG: Found {len(messages)} messages in branch '{branch_name}'")
             
-            conv = ""
+            # Clean message content and store original message structure
+            cleaned_messages = []
             for msg_idx, msg in enumerate(messages):
                 print(f"DEBUG: Message {msg_idx}: role='{msg['role']}', content_len={len(msg['content'])}")
-                print(f"DEBUG: Message {msg_idx} content preview: {repr(msg['content'][:100])}")
                 
                 # Clean malformed characters from message content
-                original_content = msg['content']
-                content = original_content
-                
-                # Count malformed characters before cleaning
-                original_c_count = original_content.count('Ċ')
-                original_a_count = original_content.count('Ä')
-                original_i_count = original_content.count('Ĭ')
-                original_ai_count = original_content.count('ÄĬ')
-                
-                if item_idx == 0:  # Debug first item only
-                    print(f"DEBUG: Item {item_idx}, Branch {branch_name}, Message {msg_idx} ({msg['role']}):")
-                    print(f"  Found {original_c_count} 'Ċ' chars, {original_a_count} 'Ä' chars, {original_i_count} 'Ĭ' chars, {original_ai_count} 'ÄĬ' sequences")
+                content = msg['content']
                 
                 # Fix the ACTUAL issue - Ċ characters should be newlines
                 content = content.replace('Ċ', '\n')
@@ -104,27 +93,17 @@ def extract_conversations(data: List[Dict]) -> List[Dict[str, str]]:
                 # Clean up multiple consecutive newlines
                 content = re.sub(r'\n+', '\n', content)
                 
-                if item_idx == 0:  # Debug first item only
-                    remaining_c_count = content.count('Ċ')
-                    remaining_a_count = content.count('Ä')
-                    remaining_i_count = content.count('Ĭ')
-                    remaining_ai_count = content.count('ÄĬ')
-                    print(f"  After cleaning: {remaining_c_count} 'Ċ', {remaining_a_count} 'Ä', {remaining_i_count} 'Ĭ', {remaining_ai_count} 'ÄĬ'")
-                    print(f"  Cleaned content preview: {repr(content[:200])}")
-                
-                # Build conversation in simple format for parsing
-                conv += f"{msg['role']}: {content}\n"
+                cleaned_messages.append({
+                    "role": msg['role'],
+                    "content": content
+                })
             
-            conv_text = conv.strip()
-            conv_dict[branch_name] = conv_text
-            print(f"DEBUG: Branch '{branch_name}' final conversation length: {len(conv_text)} chars")
-            print(f"DEBUG: Branch '{branch_name}' conversation preview: {repr(conv_text[:300])}")
+            conv_dict[branch_name] = cleaned_messages
+            print(f"DEBUG: Branch '{branch_name}' has {len(cleaned_messages)} cleaned messages")
         
         all_conversations.append(conv_dict)
     
     print(f"\nDEBUG: extract_conversations() completed - processed {len(all_conversations)} conversations")
-    print(f"DEBUG: Total branches across all conversations: {sum(len(conv) for conv in all_conversations)}")
-    
     return all_conversations
 
 def load_probe(probe_path: str, device: str) -> BaseProbe:
@@ -346,11 +325,11 @@ def main():
     for branch_name in set().union(*[conv.keys() for conv in all_conversations]):
         print(f"\nProcessing branch: {branch_name}")
         
-        # Extract conversations for this branch
-        branch_conversations = [conv.get(branch_name, "") for conv in all_conversations]
+        # Extract message lists for this branch
+        branch_messages = [conv.get(branch_name, []) for conv in all_conversations]
         
         # Skip empty conversations
-        if not any(branch_conversations):
+        if not any(branch_messages):
             print(f"No conversations found for branch {branch_name}, skipping...")
             continue
         
@@ -358,7 +337,7 @@ def main():
         print(f"\nEvaluating probe from layer {args.layer}")
         probe_configs = {(args.layer, probe.__class__.__name__): probe}
         results = evaluator.evaluate_all_probes(
-            texts=branch_conversations,
+            messages_list=branch_messages,
             labels=labels,
             probe_configs=probe_configs
         )
@@ -374,7 +353,7 @@ def main():
         deceptive_scores = []
         
         for i, (sample, label) in enumerate(zip(all_samples, labels)):
-            if not sample['text'].strip():  # Skip empty conversations
+            if not sample['messages']:  # Skip empty conversations
                 continue
                 
             score = sample['mean_score']
@@ -386,7 +365,7 @@ def main():
             print(f"\nSample {i}:")
             print(f"  True label: {label} ({'deceptive' if label == 1 else 'honest'})")
             print(f"  Mean score: {score:.4f}")
-            print(f"  Text preview: {sample['text'][:100]}...")
+            print(f"  Messages: {len(sample['messages'])} messages")
             print(f"  Token count: {len(sample['tokens'])}")
             print(f"  Score range: {min(sample['token_scores']):.4f} - {max(sample['token_scores']):.4f}")
         
@@ -461,7 +440,7 @@ def main():
         print(f"\nAdding scores for branch {branch_name} to data")
         probe_name = Path(args.probe_path).stem
         for item, score_list in zip(data, all_samples):
-            if not score_list['text'].strip():  # Skip empty conversations
+            if not score_list['messages']:  # Skip empty conversations
                 continue
                 
             # Initialize conversations dict if needed
