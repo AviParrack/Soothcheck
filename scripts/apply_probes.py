@@ -6,6 +6,7 @@ Script to apply trained probes to B2W data and save augmented results.
 import argparse
 import json
 import torch
+import gc
 from pathlib import Path
 from tqdm import tqdm
 from typing import Dict, List, Optional
@@ -263,6 +264,193 @@ def compute_critical_scores(all_samples, data):
     # Simplified version - just return empty list since we're not using this
     return []
 
+def load_jsonl_streaming(file_path: str, num_samples: Optional[int] = None):
+    """Generator that yields JSONL items one at a time for memory efficiency.
+    
+    Args:
+        file_path: Path to JSONL file
+        num_samples: If provided, only yield this many samples from the start
+    """
+    with open(file_path, 'r') as f:
+        for i, line in enumerate(f):
+            if num_samples is not None and i >= num_samples:
+                break
+            yield json.loads(line)
+
+def save_sample_result(output_file: str, sample_data: Dict, mode: str = 'a'):
+    """Save a single sample result to JSONL file.
+    
+    Args:
+        output_file: Path to output file
+        sample_data: Sample data to save
+        mode: File mode ('w' for first sample, 'a' for append)
+    """
+    with open(output_file, mode) as f:
+        f.write(json.dumps(sample_data) + '\n')
+        f.flush()  # Ensure immediate write to disk
+
+def process_sample_streaming(
+    sample_data: Dict,
+    sample_idx: int,
+    probe,
+    evaluator,
+    layer: int,
+    output_file: str
+) -> bool:
+    """Process a single sample with immediate saving and memory cleanup.
+    
+    Returns:
+        bool: True if successful, False if should skip
+    """
+    import gc
+    import torch
+    
+    print(f"\n=== Processing Sample {sample_idx} ===")
+    
+    try:
+        # Extract conversations from this single sample
+        conversations = sample_data.get('conversations', {})
+        if not conversations:
+            print(f"Sample {sample_idx}: No conversations found, skipping")
+            return False
+        
+        # Convert label
+        label = convert_label_to_binary(sample_data.get('metadata', {}).get('label', 'skip'))
+        if label == -1:
+            print(f"Sample {sample_idx}: Skip/unknown label, skipping")
+            return False
+        
+        print(f"Sample {sample_idx}: Label = {label} ({'deceptive' if label == 1 else 'honest'})")
+        
+        # Process each conversation branch
+        for branch_name, branch_data in conversations.items():
+            print(f"\nProcessing branch: {branch_name}")
+            
+            # Get messages for this branch
+            messages = branch_data.get('messages', [])
+            if not messages:
+                print(f"Branch {branch_name}: No messages, skipping")
+                continue
+            
+            # Clean messages (same as before)
+            cleaned_messages = []
+            for msg in messages:
+                content = msg['content']
+                
+                # Character cleaning
+                content = content.replace('Ċ', '\n')
+                content = content.replace('ÄĬ', '\n')
+                content = content.replace('Ä', '\n')   
+                content = content.replace('Ĭ', '\n')
+                content = re.sub(r'\n{4,}', '\n\n\n', content)
+                
+                # Remove duplicate prefix from system messages
+                if msg['role'] == 'system':
+                    prefix_patterns = [
+                        "Cutting Knowledge Date: December 2023\nToday Date: 26 Jul 2024\n\n",
+                        "Cutting Knowledge Date: December 2023\nToday Date: 26 Jul 2024\n",
+                        "Cutting Knowledge Date: December 2023\nToday Date: 26 Jul 2024",
+                    ]
+                    
+                    original_length = len(content)
+                    for pattern in prefix_patterns:
+                        if content.startswith(pattern):
+                            content = content[len(pattern):]
+                            print(f"DEBUG: Removed duplicate prefix from system message ({original_length} -> {len(content)} chars)")
+                            break
+                    
+                    if len(content) == original_length:
+                        for pattern in prefix_patterns:
+                            if pattern in content:
+                                content = content.replace(pattern, "", 1)
+                                print(f"DEBUG: Removed duplicate prefix found within system message ({original_length} -> {len(content)} chars)")
+                                break
+                
+                cleaned_messages.append({
+                    "role": msg['role'],
+                    "content": content
+                })
+            
+            # Process this single conversation with ultra-conservative memory
+            print(f"Getting activations for 1 conversation...")
+            
+            # Clear GPU memory before processing
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            gc.collect()
+            
+            # Get activations for this single conversation
+            activation_data = evaluator.get_batch_activations(
+                messages_list=[cleaned_messages],  # Single conversation
+                layers=[layer],
+                batch_size=1
+            )
+            
+            # Process probe immediately
+            probe_configs = {(layer, probe.__class__.__name__): probe}
+            results = evaluator.evaluate_all_probes(
+                messages_list=[cleaned_messages],
+                labels=[label],
+                probe_configs=probe_configs
+            )
+            
+            # Extract results
+            probe_key = (layer, probe.__class__.__name__)
+            sample_result = results[probe_key]['all_samples'][0]
+            
+            # Add probe scores to the sample data
+            probe_name = f"layer_{layer}_{probe.__class__.__name__}"
+            
+            # Initialize structures if needed
+            if 'conversations' not in sample_data:
+                sample_data['conversations'] = {}
+            if branch_name not in sample_data['conversations']:
+                sample_data['conversations'][branch_name] = {}
+            
+            # Add probe results
+            if 'available_probes' not in sample_data['conversations'][branch_name]:
+                sample_data['conversations'][branch_name]['available_probes'] = []
+            if probe_name not in sample_data['conversations'][branch_name]['available_probes']:
+                sample_data['conversations'][branch_name]['available_probes'].append(probe_name)
+            
+            if 'probe_scores' not in sample_data['conversations'][branch_name]:
+                sample_data['conversations'][branch_name]['probe_scores'] = {}
+            sample_data['conversations'][branch_name]['probe_scores'][probe_name] = sample_result['token_scores']
+            
+            if 'token_lists' not in sample_data['conversations'][branch_name]:
+                sample_data['conversations'][branch_name]['token_lists'] = {}
+            sample_data['conversations'][branch_name]['token_lists'][probe_name] = sample_result['tokens']
+            
+            print(f"Branch {branch_name}: Added {len(sample_result['token_scores'])} token scores")
+            print(f"Mean score: {sample_result['mean_score']:.4f}")
+            
+            # Aggressive cleanup after each branch
+            del activation_data, results, sample_result
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            gc.collect()
+        
+        # Save this sample immediately
+        mode = 'w' if sample_idx == 0 else 'a'
+        save_sample_result(output_file, sample_data, mode)
+        print(f"Sample {sample_idx}: Saved to {output_file}")
+        
+        # Final cleanup
+        del sample_data
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        gc.collect()
+        
+        return True
+        
+    except Exception as e:
+        print(f"ERROR processing sample {sample_idx}: {e}")
+        # Emergency cleanup
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        gc.collect()
+        return False
+
 def main():
     parser = argparse.ArgumentParser(description="Apply probes to B2W data")
     parser.add_argument("--input_file", type=str, required=True,
@@ -276,17 +464,13 @@ def main():
     parser.add_argument("--layer", type=int, required=True,
                       help="Layer number to extract activations from")
     parser.add_argument("--batch_size", type=int, default=1,
-                      help="Initial batch size for processing (will be reduced if OOM occurs)")
+                      help="Batch size (fixed at 1 for streaming)")
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu",
                       help="Device to run on (cuda/cpu)")
     parser.add_argument("--num_samples", type=int, default=None,
                       help="Number of samples to process (default: all)")
-    parser.add_argument("--threshold", type=float, default=None,
-                      help="Classification threshold (default: auto-computed from score distribution)")
-    parser.add_argument("--debug", action="store_true",
-                      help="Enable detailed debug output")
-    parser.add_argument("--critical_only", action="store_true",
-                      help="Only use critical tokens for final metrics")
+    parser.add_argument("--resume_from", type=int, default=0,
+                      help="Resume processing from this sample index (default: 0)")
     
     args = parser.parse_args()
     
@@ -296,44 +480,14 @@ def main():
     # Generate output path
     output_file = get_output_path(args.input_file, args.output_dir, args.num_samples)
     
-    # Load data
-    print(f"Loading data from {args.input_file}")
-    if args.num_samples:
-        print(f"Processing first {args.num_samples} samples")
-    data = load_jsonl(args.input_file, args.num_samples)
-    print(f"Loaded {len(data)} samples")
-    
-    # Extract conversations and convert labels
-    print("\n=== Label Processing ===")
-    all_conversations = extract_conversations(data)
-    
-    # Print raw labels before conversion
-    print("\nRaw labels before conversion:")
-    for i, item in enumerate(data):
-        label = item.get('metadata', {}).get('label', 'skip')
-        print(f"Sample {i}: {label}")
-    
-    labels = [convert_label_to_binary(item.get('metadata', {}).get('label', 'skip')) for item in data]
-    
-    # Print converted labels
-    print("\nConverted binary labels:")
-    for i, (label, orig) in enumerate(zip(labels, data)):
-        print(f"Sample {i}: {orig.get('metadata', {}).get('label', 'skip')} -> {label}")
-    
-    # Filter out skipped samples
-    valid_indices = [i for i, label in enumerate(labels) if label != -1]
-    if len(valid_indices) < len(labels):
-        print(f"\nFiltered out {len(labels) - len(valid_indices)} samples with skip/unknown labels")
-        print("Removed indices:", [i for i in range(len(labels)) if i not in valid_indices])
-        all_conversations = [all_conversations[i] for i in valid_indices]
-        labels = [labels[i] for i in valid_indices]
-        data = [data[i] for i in valid_indices]
-    
-    print(f"\nProcessing {len(all_conversations)} valid samples")
-    print(f"Binary label distribution:")
-    print(f"  Deceptive (1): {sum(labels)}")
-    print(f"  Honest (0): {len(labels) - sum(labels)}")
-    print(f"  Ratio deceptive/honest: {sum(labels)/(len(labels) - sum(labels)):.2f}")
+    print(f"=== STREAMING PROBE PROCESSING ===")
+    print(f"Input file: {args.input_file}")
+    print(f"Output file: {output_file}")
+    print(f"Model: {args.model_name}")
+    print(f"Probe: {args.probe_path}")
+    print(f"Layer: {args.layer}")
+    print(f"Max samples: {args.num_samples or 'all'}")
+    print(f"Resume from: {args.resume_from}")
     
     # Load probe
     print(f"\nInitializing probe from {args.probe_path}")
@@ -346,165 +500,83 @@ def main():
         device=args.device
     )
     
-    # Process each conversation branch
-    print("\n=== Processing Conversation Branches ===")
-    for branch_name in set().union(*[conv.keys() for conv in all_conversations]):
-        print(f"\nProcessing branch: {branch_name}")
-        
-        # Extract message lists for this branch
-        branch_messages = [conv.get(branch_name, []) for conv in all_conversations]
-        
-        # Skip empty conversations
-        if not any(branch_messages):
-            print(f"No conversations found for branch {branch_name}, skipping...")
+    # Process samples one by one using streaming
+    print(f"\n=== STARTING STREAMING PROCESSING ===")
+    
+    processed_count = 0
+    successful_count = 0
+    
+    # Count total samples for progress tracking
+    total_samples = 0
+    with open(args.input_file, 'r') as f:
+        for _ in f:
+            total_samples += 1
+    
+    if args.num_samples:
+        total_samples = min(total_samples, args.num_samples)
+    
+    print(f"Total samples to process: {total_samples}")
+    print(f"Starting from sample: {args.resume_from}")
+    
+    # Stream process each sample
+    for sample_idx, sample_data in enumerate(load_jsonl_streaming(args.input_file, args.num_samples)):
+        # Skip samples if resuming
+        if sample_idx < args.resume_from:
             continue
+            
+        print(f"\n{'='*60}")
+        print(f"PROCESSING SAMPLE {sample_idx + 1}/{total_samples}")
+        print(f"{'='*60}")
         
-        # Evaluate probe
-        print(f"\nEvaluating probe from layer {args.layer}")
-        probe_configs = {(args.layer, probe.__class__.__name__): probe}
-        results = evaluator.evaluate_all_probes(
-            messages_list=branch_messages,
-            labels=labels,
-            probe_configs=probe_configs
+        # Process this sample
+        success = process_sample_streaming(
+            sample_data=sample_data,
+            sample_idx=sample_idx,
+            probe=probe,
+            evaluator=evaluator,
+            layer=args.layer,
+            output_file=output_file
         )
         
-        # Analyze results in detail
-        print("\n=== Detailed Results Analysis ===")
-        probe_key = (args.layer, probe.__class__.__name__)
-        all_samples = results[probe_key]['all_samples']
-        mean_scores = results[probe_key]['mean_scores']
+        processed_count += 1
+        if success:
+            successful_count += 1
         
-        print("\nPer-sample analysis:")
-        honest_scores = []
-        deceptive_scores = []
+        # Progress update
+        print(f"\nProgress: {processed_count}/{total_samples - args.resume_from} processed, {successful_count} successful")
         
-        for i, (sample, label) in enumerate(zip(all_samples, labels)):
-            if not sample['messages']:  # Skip empty conversations
-                continue
-                
-            score = sample['mean_score']
-            if label == 1:
-                deceptive_scores.append(score)
-            else:
-                honest_scores.append(score)
-            
-            print(f"\nSample {i}:")
-            print(f"  True label: {label} ({'deceptive' if label == 1 else 'honest'})")
-            print(f"  Mean score: {score:.4f}")
-            print(f"  Messages: {len(sample['messages'])} messages")
-            print(f"  Token count: {len(sample['tokens'])}")
-            print(f"  Score range: {min(sample['token_scores']):.4f} - {max(sample['token_scores']):.4f}")
+        # Memory status
+        if torch.cuda.is_available():
+            memory_allocated = torch.cuda.memory_allocated() / 1024**3
+            memory_reserved = torch.cuda.memory_reserved() / 1024**3
+            print(f"GPU Memory: {memory_allocated:.2f}GB allocated, {memory_reserved:.2f}GB reserved")
         
-        print("\nScore distribution by class:")
-        if honest_scores:
-            print(f"  Honest (0) scores:")
-            print(f"    Min: {min(honest_scores):.4f}")
-            print(f"    Max: {max(honest_scores):.4f}")
-            print(f"    Mean: {sum(honest_scores)/len(honest_scores):.4f}")
-        if deceptive_scores:
-            print(f"  Deceptive (1) scores:")
-            print(f"    Min: {min(deceptive_scores):.4f}")
-            print(f"    Max: {max(deceptive_scores):.4f}")
-            print(f"    Mean: {sum(deceptive_scores)/len(deceptive_scores):.4f}")
-        
-        print("\nOverall score distribution:")
-        print(f"  Min score: {min(mean_scores):.4f}")
-        print(f"  Max score: {max(mean_scores):.4f}")
-        print(f"  Mean score: {sum(mean_scores)/len(mean_scores):.4f}")
-        
-        # Calculate optimal threshold if not provided
-        if args.threshold is None:
-            # Sort scores and find gap between classes
-            sorted_scores = sorted((score, label) for score, label in zip(mean_scores, labels))
-            max_gap = 0
-            best_threshold = 0.5
-            
-            print("\nGap analysis for threshold:")
-            for i in range(len(sorted_scores) - 1):
-                gap = sorted_scores[i + 1][0] - sorted_scores[i][0]
-                print(f"  Gap between {sorted_scores[i][0]:.4f} ({sorted_scores[i][1]}) and {sorted_scores[i+1][0]:.4f} ({sorted_scores[i+1][1]}): {gap:.4f}")
-                if gap > max_gap:
-                    max_gap = gap
-                    best_threshold = (sorted_scores[i][0] + sorted_scores[i + 1][0]) / 2
-                    print(f"    New best threshold: {best_threshold:.4f}")
-            
-            threshold = best_threshold
-            print(f"\nAuto-computed threshold: {threshold:.4f}")
-        else:
-            threshold = args.threshold
-            print(f"\nUsing provided threshold: {threshold:.4f}")
-        
-        # Recalculate metrics with new threshold
-        predictions = [1 if score > threshold else 0 for score in mean_scores]
-        
-        print("\nConfusion matrix:")
-        tp = sum(1 for p, l in zip(predictions, labels) if p == 1 and l == 1)
-        fp = sum(1 for p, l in zip(predictions, labels) if p == 1 and l == 0)
-        fn = sum(1 for p, l in zip(predictions, labels) if p == 0 and l == 1)
-        tn = sum(1 for p, l in zip(predictions, labels) if p == 0 and l == 0)
-        print(f"  True Positives (deceptive correctly identified): {tp}")
-        print(f"  False Positives (honest misclassified as deceptive): {fp}")
-        print(f"  False Negatives (deceptive misclassified as honest): {fn}")
-        print(f"  True Negatives (honest correctly identified): {tn}")
-        
-        metrics = {
-            'accuracy': float(accuracy_score(labels, predictions)),
-            'precision': float(precision_score(labels, predictions)),
-            'recall': float(recall_score(labels, predictions)),
-            'f1': float(f1_score(labels, predictions)),
-            'auroc': float(roc_auc_score(labels, mean_scores))
-        }
-        
-        print("\nProbe Performance Metrics:")
-        print(f"AUROC: {metrics['auroc']:.4f}")
-        print(f"Accuracy: {metrics['accuracy']:.4f}")
-        print(f"F1 Score: {metrics['f1']:.4f}")
-        print(f"Precision: {metrics['precision']:.4f}")
-        print(f"Recall: {metrics['recall']:.4f}")
-        
-        # Add scores to data
-        print(f"\nAdding scores for branch {branch_name} to data")
-        probe_name = Path(args.probe_path).stem
-        for item, score_list in zip(data, all_samples):
-            if not score_list['messages']:  # Skip empty conversations
-                continue
-                
-            # Initialize conversations dict if needed
-            if 'conversations' not in item:
-                item['conversations'] = {}
-            if branch_name not in item['conversations']:
-                item['conversations'][branch_name] = {}
-            
-            # Add probe to available_probes
-            if 'available_probes' not in item['conversations'][branch_name]:
-                item['conversations'][branch_name]['available_probes'] = []
-            if probe_name not in item['conversations'][branch_name]['available_probes']:
-                item['conversations'][branch_name]['available_probes'].append(probe_name)
-            
-            # Initialize probe_scores if needed
-            if 'probe_scores' not in item['conversations'][branch_name]:
-                item['conversations'][branch_name]['probe_scores'] = {}
-            
-            # Store scores directly as a list like pairs_probe and rp_probe
-            item['conversations'][branch_name]['probe_scores'][probe_name] = score_list['token_scores']
-            
-            # Store token list in a separate field for later alignment
-            if 'token_lists' not in item['conversations'][branch_name]:
-                item['conversations'][branch_name]['token_lists'] = {}
-            item['conversations'][branch_name]['token_lists'][probe_name] = score_list['tokens']
-            
-            # Validate the stored data
-            print(f"\nValidating stored data for sample {item.get('id', 'unknown')}:")
-            print(f"  Branch: {branch_name}")
-            print(f"  Probe: {probe_name}")
-            print(f"  Token count: {len(score_list['token_scores'])}")
-            print(f"  Available probes: {item['conversations'][branch_name]['available_probes']}")
-            print(f"  First few tokens: {score_list['tokens'][:5]}")
-            print(f"  Last few tokens: {score_list['tokens'][-5:]}")
+        # Emergency break if we're getting close to memory limit
+        if torch.cuda.is_available() and torch.cuda.memory_allocated() > 60 * 1024**3:  # 60GB threshold
+            print("WARNING: High GPU memory usage detected, forcing cleanup...")
+            torch.cuda.empty_cache()
+            import gc
+            gc.collect()
     
-    # Save augmented data
-    print(f"\nSaving results to {output_file}")
-    save_jsonl(data, output_file)
+    print(f"\n{'='*60}")
+    print(f"STREAMING PROCESSING COMPLETE")
+    print(f"{'='*60}")
+    print(f"Total processed: {processed_count}")
+    print(f"Successful: {successful_count}")
+    print(f"Failed: {processed_count - successful_count}")
+    print(f"Results saved to: {output_file}")
+    
+    if successful_count > 0:
+        print(f"\n✅ Successfully processed {successful_count} samples!")
+        print(f"📁 Output file: {output_file}")
+    else:
+        print(f"\n❌ No samples were successfully processed.")
+    
+    # Final cleanup
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    import gc
+    gc.collect()
 
 if __name__ == "__main__":
     main() 

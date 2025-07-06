@@ -86,9 +86,74 @@ class OptimizedBatchProbeEvaluator:
         # Cache for activations
         self._activation_cache = {}
         
-    def get_batch_activations(self, messages_list: List[List[Dict[str, str]]], layers: List[int], 
+    def _parse_text_to_messages(self, text: str) -> List[Dict[str, str]]:
+        """Simple parser for backward compatibility with text-based inputs"""
+        # Very basic parsing - assumes format like "role: content\nrole: content"
+        messages = []
+        current_role = None
+        current_content = []
+        
+        lines = text.strip().split('\n')
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+                
+            # Check if this is a role line
+            if ':' in line and line.split(':', 1)[0].strip() in ['system', 'user', 'assistant']:
+                # Save previous message
+                if current_role and current_content:
+                    messages.append({
+                        "role": current_role,
+                        "content": '\n'.join(current_content).strip()
+                    })
+                
+                # Start new message
+                parts = line.split(':', 1)
+                current_role = parts[0].strip()
+                current_content = [parts[1].strip()] if len(parts) > 1 and parts[1].strip() else []
+            else:
+                # Add to current content
+                if current_role:
+                    current_content.append(line)
+        
+        # Add final message
+        if current_role and current_content:
+            messages.append({
+                "role": current_role,
+                "content": '\n'.join(current_content).strip()
+            })
+        
+        return messages
+        
+    def get_batch_activations(self, messages_list=None, texts=None, layers: List[int] = None, 
                             batch_size: int = 1) -> Dict[int, torch.Tensor]:
-        """Get activations for all message lists and layers efficiently using HuggingFace model"""
+        """Get activations for all message lists/texts and layers efficiently using HuggingFace model
+        
+        Args:
+            messages_list: List of message lists (new streaming approach)
+            texts: List of text strings (old batch approach) 
+            layers: List of layer indices
+            batch_size: Batch size for processing
+            
+        Note: Provide either messages_list OR texts, not both
+        """
+        
+        # Backward compatibility: handle both old and new approaches
+        if texts is not None and messages_list is not None:
+            raise ValueError("Provide either messages_list OR texts, not both")
+        
+        if texts is not None:
+            # OLD APPROACH: Convert texts back to message format for processing
+            print("DEBUG: Using backward compatibility mode with text inputs")
+            messages_list = []
+            for text in texts:
+                # Parse text back to messages (simple parsing)
+                messages = self._parse_text_to_messages(text)
+                messages_list.append(messages)
+        
+        if messages_list is None:
+            raise ValueError("Must provide either messages_list or texts")
         
         print("DEBUG: get_batch_activations called with message lists")
         print(f"DEBUG: Processing {len(messages_list)} conversations")
@@ -303,16 +368,39 @@ class OptimizedBatchProbeEvaluator:
         
         return result
     
-    def evaluate_all_probes(self, messages_list: List[List[Dict[str, str]]], labels: List[int], 
-                          probe_configs: Dict[Tuple[int, str], BaseProbe]) -> Dict[Tuple[int, str], Dict]:
-        """Evaluate all probes efficiently using cached activations"""
+    def evaluate_all_probes(self, messages_list=None, texts=None, labels: List[int] = None, 
+                          probe_configs: Dict[Tuple[int, str], BaseProbe] = None) -> Dict[Tuple[int, str], Dict]:
+        """Evaluate all probes efficiently using cached activations
+        
+        Args:
+            messages_list: List of message lists (new streaming approach)
+            texts: List of text strings (old batch approach)
+            labels: List of binary labels
+            probe_configs: Dictionary mapping (layer, probe_type) to probe instances
+            
+        Note: Provide either messages_list OR texts, not both
+        """
+        
+        # Backward compatibility
+        if texts is not None and messages_list is not None:
+            raise ValueError("Provide either messages_list OR texts, not both")
+        
+        if texts is not None:
+            print("DEBUG: evaluate_all_probes using backward compatibility mode")
+            messages_list = []
+            for text in texts:
+                messages = self._parse_text_to_messages(text)
+                messages_list.append(messages)
+        
+        if messages_list is None:
+            raise ValueError("Must provide either messages_list or texts")
         
         # Extract unique layers from probe configs
         layers = list(set(layer for layer, _ in probe_configs.keys()))
         
         # Get activations for all required layers at once
         print("Getting activations for all layers...")
-        activation_data = self.get_batch_activations(messages_list, layers)
+        activation_data = self.get_batch_activations(messages_list=messages_list, layers=layers)
         activations = activation_data['activations']
         tokens_by_text = activation_data['tokens_by_text']
         
