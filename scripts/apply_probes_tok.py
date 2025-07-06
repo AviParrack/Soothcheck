@@ -13,7 +13,25 @@ from probity.probes.base import BaseProbe
 
 def load_probe(probe_path: str, device: str) -> BaseProbe:
     """Load probe from path."""
-    probe = BaseProbe.load_json(probe_path)
+    if probe_path.endswith('.json'):
+        probe = BaseProbe.load_json(probe_path)
+    else:
+        # Load PT file (NTML format)
+        state = torch.load(probe_path, map_location=device)
+        # NTML probes are always LogisticProbe
+        from probity.probes import LogisticProbe, LogisticProbeConfig
+        config = LogisticProbeConfig(
+            input_size=state['model_config']['input_size'],
+            device=device,
+            model_name=state['training_config'].get('model_name', 'unknown'),
+            hook_point=state['training_config'].get('hook_point', 'unknown'),
+            hook_layer=state['training_config'].get('hook_layer', 0),
+            normalize_weights=state['model_config'].get('normalize_weights', True),
+            bias=state['model_config'].get('bias', True)
+        )
+        probe = LogisticProbe(config=config)
+        probe.load_state_dict(state['model_state_dict'])
+    
     probe.to(device)
     return probe
 
