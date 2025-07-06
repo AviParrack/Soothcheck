@@ -90,8 +90,9 @@ def extract_conversations(data: List[Dict]) -> List[Dict[str, List[Dict]]]:
                 content = content.replace('Ä', '\n')   
                 content = content.replace('Ĭ', '\n')
                 
-                # Clean up multiple consecutive newlines
-                content = re.sub(r'\n+', '\n', content)
+                # Clean up multiple consecutive newlines - but preserve specific patterns
+                # Don't collapse all multiple newlines, some might be intentional
+                content = re.sub(r'\n{4,}', '\n\n\n', content)  # Max 3 consecutive newlines
                 
                 # CRITICAL FIX: Remove chat template prefix from system messages
                 # The dataset already contains this prefix, but chat template adds it again
