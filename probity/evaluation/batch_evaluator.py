@@ -120,16 +120,50 @@ class OptimizedBatchProbeEvaluator:
                         formatted_texts.append("")
                         continue
                     
+                    # DEBUG: Show original messages before applying chat template
+                    print(f"DEBUG: Original messages for sample {idx}:")
+                    for msg_idx, msg in enumerate(messages):
+                        print(f"  Message {msg_idx}: role={msg['role']}")
+                        print(f"    Content length: {len(msg['content'])}")
+                        print(f"    Content first 200 chars: {repr(msg['content'][:200])}")
+                        
+                        # Check for duplicate prefix in original content
+                        if msg['role'] == 'system' and 'Cutting Knowledge Date' in msg['content']:
+                            prefix_count = msg['content'].count('Cutting Knowledge Date')
+                            print(f"    WARNING: Found {prefix_count} instances of 'Cutting Knowledge Date' in original system message!")
+                            if prefix_count > 1:
+                                print(f"    DUPLICATE DETECTED: Original dataset already has duplicate prefix!")
+                    
                     # Apply chat template directly to the message structure
                     try:
+                        # First try with add_generation_prompt=False to match original
                         formatted_text = self.tokenizer.apply_chat_template(
                             messages,
                             tokenize=False,
                             add_generation_prompt=False
                         )
+                        
+                        # Check if we need to add the double <|begin_of_text|> like the original
+                        if not formatted_text.startswith("<|begin_of_text|><|begin_of_text|>"):
+                            if formatted_text.startswith("<|begin_of_text|>"):
+                                # Add the missing second <|begin_of_text|>
+                                formatted_text = "<|begin_of_text|>" + formatted_text
+                                print(f"DEBUG: Added missing second <|begin_of_text|> token")
+                            else:
+                                # Add both tokens
+                                formatted_text = "<|begin_of_text|><|begin_of_text|>" + formatted_text
+                                print(f"DEBUG: Added both <|begin_of_text|> tokens")
+                        
                         print(f"DEBUG: Chat template applied successfully to sample {idx}")
                         print(f"DEBUG: Sample {idx} formatted length: {len(formatted_text)}")
                         print(f"DEBUG: Sample {idx} first 200 chars: {repr(formatted_text[:200])}")
+                        
+                        # Check for duplicates in final formatted text
+                        if 'Cutting Knowledge Date' in formatted_text:
+                            final_prefix_count = formatted_text.count('Cutting Knowledge Date')
+                            print(f"DEBUG: Final formatted text has {final_prefix_count} instances of 'Cutting Knowledge Date'")
+                            if final_prefix_count > 1:
+                                print(f"DEBUG: DUPLICATION CONFIRMED in final output!")
                         
                         formatted_texts.append(formatted_text)
                         

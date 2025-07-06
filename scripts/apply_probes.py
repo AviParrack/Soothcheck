@@ -93,6 +93,31 @@ def extract_conversations(data: List[Dict]) -> List[Dict[str, List[Dict]]]:
                 # Clean up multiple consecutive newlines
                 content = re.sub(r'\n+', '\n', content)
                 
+                # CRITICAL FIX: Remove chat template prefix from system messages
+                # The dataset already contains this prefix, but chat template adds it again
+                if msg['role'] == 'system':
+                    # Remove the automatic prefix that chat template will add
+                    prefix_patterns = [
+                        "Cutting Knowledge Date: December 2023\nToday Date: 26 Jul 2024\n\n",
+                        "Cutting Knowledge Date: December 2023\nToday Date: 26 Jul 2024\n",
+                        "Cutting Knowledge Date: December 2023\nToday Date: 26 Jul 2024",
+                    ]
+                    
+                    original_length = len(content)
+                    for pattern in prefix_patterns:
+                        if content.startswith(pattern):
+                            content = content[len(pattern):]
+                            print(f"DEBUG: Removed duplicate prefix from system message ({original_length} -> {len(content)} chars)")
+                            break
+                    
+                    # Also check if it appears elsewhere in the content
+                    if len(content) == original_length:  # No removal happened
+                        for pattern in prefix_patterns:
+                            if pattern in content:
+                                content = content.replace(pattern, "", 1)
+                                print(f"DEBUG: Removed duplicate prefix found within system message ({original_length} -> {len(content)} chars)")
+                                break
+                
                 cleaned_messages.append({
                     "role": msg['role'],
                     "content": content
